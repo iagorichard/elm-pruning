@@ -1,4 +1,6 @@
-from typing import List
+from typing import List, Dict
+from pathlib import Path
+import json
 import torch
 import torch.nn as nn
 
@@ -35,3 +37,12 @@ def discover_conv2d_layers(model: nn.Module, only_decoder: bool = False) -> List
             result.append(name)
 
     return result
+
+def dump_dict(dictx : Dict, dict_path: Path):
+    with open(dict_path, 'w') as json_file:
+        json.dump(dictx, json_file, indent=4)
+
+def load_dict(dict_path: Path):
+    with open(dict_path, 'r') as json_file:
+        data = json.load(json_file)
+    return data
