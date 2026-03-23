@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -6,6 +5,7 @@ from tqdm.auto import tqdm
 import torch
 from torch import nn
 from .utils import get_layer_by_string, get_all_conv_layer_names
+from .elm import ELMRegressor
 
 @dataclass
 class ImportanceProcessorConfig:
@@ -248,29 +248,23 @@ class ELMImportanceProcessor:
         X = torch.cat(X_parts, dim=1)
         Y = self.targets
 
-        elm_model = ELMImportanceProcessor._fit_elm_regressor(
-            X=X,
-            Y=Y,
+        elm_model = ELMRegressor(
             hidden_dim=self.config.hidden_dim,
             reg_lambda=self.config.reg_lambda,
             activation_name=self.config.activation,
             seed=self.config.seed,
             eps=self.config.eps,
-            device=self.device,
             use_double_for_solver=self.config.use_double_for_solver,
         )
 
-        importances_flat = ELMImportanceProcessor._compute_ablation_importance(
-            elm_model=elm_model,
-            X=X.to(self.device),
-            Y=Y.to(self.device),
-        )
+        elm_model.fit(X, Y)
+        importances = elm_model.compute_ablation_importance(X, Y)
 
         result: Dict[str, List[float]] = {}
         offset = 0
         for layer_name in tqdm(self.layer_names, desc="ELM global feature ranking processing", dynamic_ncols=True):
             channels = self.features_by_layer[layer_name].shape[1]
-            result[layer_name] = importances_flat[offset: offset + channels]
+            result[layer_name] = importances[offset: offset + channels]
             offset += channels
 
         return result
@@ -286,23 +280,17 @@ class ELMImportanceProcessor:
         for layer_name in tqdm(self.layer_names, desc="ELM layerwise feature ranking processing", dynamic_ncols=True):
             X = self.features_by_layer[layer_name].to(self.device)
 
-            elm_model = ELMImportanceProcessor._fit_elm_regressor(
-                X=X,
-                Y=Y,
+            elm_model = ELMRegressor(
                 hidden_dim=self.config.hidden_dim,
                 reg_lambda=self.config.reg_lambda,
                 activation_name=self.config.activation,
                 seed=self.config.seed,
                 eps=self.config.eps,
-                device=self.device,
                 use_double_for_solver=self.config.use_double_for_solver,
             )
 
-            importances = ELMImportanceProcessor._compute_ablation_importance(
-                elm_model=elm_model,
-                X=X,
-                Y=Y,
-            )
+            elm_model.fit(X, Y)
+            importances = elm_model.compute_ablation_importance(X, Y)
             result[layer_name] = importances
 
         return result
@@ -324,20 +312,18 @@ class ELMImportanceProcessor:
             for filter_idx in range(X_layer.shape[1]):
                 X_filter = X_layer[:, filter_idx:filter_idx + 1]
 
-                elm_model = ELMImportanceProcessor._fit_elm_regressor(
-                    X=X_filter,
-                    Y=Y,
+                elm_model = ELMRegressor(
                     hidden_dim=self.config.hidden_dim_per_filter,
                     reg_lambda=self.config.reg_lambda,
                     activation_name=self.config.activation,
                     seed=self.config.seed + filter_idx,
                     eps=self.config.eps,
-                    device=self.device,
                     use_double_for_solver=self.config.use_double_for_solver,
                 )
 
-                pred = ELMImportanceProcessor._predict_elm(elm_model, X_filter)
-                filter_loss = ELMImportanceProcessor._mse(pred, Y).item()
+                elm_model.fit(X_filter, Y)
+                pred = elm_model.predict(X_filter)
+                filter_loss = elm_model.calculate_loss(pred, Y).item()
 
                 # Higher reduction => more important
                 importance = max(baseline_loss - filter_loss, 0.0)
@@ -348,129 +334,8 @@ class ELMImportanceProcessor:
         return result
 
     # -------------------------------------------------------------------------
-    # ELM core
-    # -------------------------------------------------------------------------
-
-    @staticmethod
-    def _fit_elm_regressor(
-        X: Tensor,
-        Y: Tensor,
-        hidden_dim: int,
-        reg_lambda: float,
-        activation_name: str,
-        seed: int,
-        eps: float,
-        device: torch.device,
-        use_double_for_solver: bool,
-    ) -> Dict[str, Tensor]:
-        X = X.to(device)
-        Y = Y.to(device)
-
-        X_mean = X.mean(dim=0, keepdim=True)
-        X_std = X.std(dim=0, keepdim=True, unbiased=False).clamp_min(eps)
-        Xn = (X - X_mean) / X_std
-
-        Y_mean = Y.mean(dim=0, keepdim=True)
-        Yn = Y - Y_mean
-
-        generator = torch.Generator(device=device)
-        generator.manual_seed(seed)
-
-        in_dim = Xn.shape[1]
-        out_dim = Yn.shape[1]
-
-        W = torch.randn((in_dim, hidden_dim), generator=generator, device=device) / math.sqrt(max(in_dim, 1))
-        b = torch.randn((hidden_dim,), generator=generator, device=device)
-
-        H = ELMImportanceProcessor._apply_activation(Xn @ W + b, activation_name)
-
-        I = torch.eye(hidden_dim, device=device, dtype=H.dtype)
-        lhs = H.T @ H + reg_lambda * I
-        rhs = H.T @ Yn
-
-        if use_double_for_solver:
-            beta = torch.linalg.solve(lhs.double(), rhs.double()).to(H.dtype)
-        else:
-            beta = torch.linalg.solve(lhs, rhs)
-
-        return {
-            "W": W,
-            "b": b,
-            "beta": beta,
-            "X_mean": X_mean,
-            "X_std": X_std,
-            "Y_mean": Y_mean,
-            "activation_name": activation_name,
-        }
-
-    @staticmethod
-    def _predict_elm(elm_model: Dict[str, Tensor], X: Tensor) -> Tensor:
-        X = X.to(elm_model["W"].device)
-
-        Xn = (X - elm_model["X_mean"]) / elm_model["X_std"]
-        H = ELMImportanceProcessor._apply_activation(
-            Xn @ elm_model["W"] + elm_model["b"],
-            elm_model["activation_name"],
-        )
-        return H @ elm_model["beta"] + elm_model["Y_mean"]
-
-    @staticmethod
-    def _compute_ablation_importance(
-        elm_model: Dict[str, Tensor],
-        X: Tensor,
-        Y: Tensor,
-    ) -> List[float]:
-        """
-        Importance = increase in ELM loss when feature is neutralized to its mean value.
-        Since pruning removes less important filters, low scores should be pruned first.
-        """
-        X = X.to(elm_model["W"].device)
-        Y = Y.to(elm_model["W"].device)
-
-        base_pred = ELMImportanceProcessor._predict_elm(elm_model, X)
-        base_loss = ELMImportanceProcessor._mse(base_pred, Y).item()
-
-        importances: List[float] = []
-        X_work = X.clone()
-
-        for feature_idx in range(X.shape[1]):
-            original_column = X_work[:, feature_idx].clone()
-
-            # Neutralize feature by sending it to its mean value
-            X_work[:, feature_idx] = elm_model["X_mean"][0, feature_idx]
-
-            ablated_pred = ELMImportanceProcessor._predict_elm(elm_model, X_work)
-            ablated_loss = ELMImportanceProcessor._mse(ablated_pred, Y).item()
-
-            importance = max(ablated_loss - base_loss, 0.0)
-            importances.append(float(importance))
-
-            X_work[:, feature_idx] = original_column
-
-        return importances
-
-    # -------------------------------------------------------------------------
     # Utils
     # -------------------------------------------------------------------------
-
-    
-
-    @staticmethod
-    def _apply_activation(x: Tensor, activation_name: str) -> Tensor:
-        activation_name = activation_name.lower()
-
-        if activation_name == "tanh":
-            return torch.tanh(x)
-        if activation_name == "relu":
-            return torch.relu(x)
-        if activation_name == "sigmoid":
-            return torch.sigmoid(x)
-
-        raise ValueError(f"Unsupported activation: {activation_name}")
-
-    @staticmethod
-    def _mse(pred: Tensor, target: Tensor) -> Tensor:
-        return torch.mean((pred - target) ** 2)
 
     @staticmethod
     def _constant_baseline_loss(Y: Tensor) -> float:
