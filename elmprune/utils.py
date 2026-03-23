@@ -1,5 +1,6 @@
-from typing import List, Dict
+from typing import List, Dict, Iterable
 from pathlib import Path
+import copy
 import json
 import torch
 import torch.nn as nn
@@ -46,3 +47,12 @@ def load_dict(dict_path: Path):
     with open(dict_path, 'r') as json_file:
         data = json.load(json_file)
     return data
+
+def get_first_dataloader_image(dataloader: Iterable):
+    batch = next(iter(dataloader))
+    return batch["image"][0].unsqueeze(0)
+
+def clone_model(model: torch.nn):
+    cloned_model = copy.deepcopy(model)
+    cloned_model = cloned_model.cpu()
+    return cloned_model
