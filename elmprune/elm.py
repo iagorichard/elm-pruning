@@ -2,6 +2,7 @@ from typing import Dict, List
 import math
 import torch
 
+
 class ELMRegressor:
 
     def __init__(self, hidden_dim: int, reg_lambda: float, activation_name: str, seed: int, eps: float, use_double_for_solver: bool):

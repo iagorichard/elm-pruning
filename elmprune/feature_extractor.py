@@ -1,51 +1,30 @@
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-from tqdm.auto import tqdm
 import torch
-from torch import nn
-from .utils import get_layer_by_string, get_all_conv_layer_names, compute_constant_baseline_loss
-from .elm import ELMRegressor
+import torch.nn as nn
+from tqdm.auto import tqdm
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from .utils import get_layer_by_string
+from .importance_processor_config import ImportanceProcessorConfig
 
 
-@dataclass
-class ImportanceProcessorConfig:
-    hidden_dim: int = 128
-    hidden_dim_per_filter: int = 16
-    reg_lambda: float = 1e-3
-    activation: str = "tanh"  # tanh | relu | sigmoid
-    max_batches: Optional[int] = None
-    eps: float = 1e-8
-    seed: int = 42
-    use_double_for_solver: bool = True
-    feature_type = "segmentation" # segmention | logits
-    num_classes = 3 # if segmentation
-    layer_names = "" # to get importance for all layers, or list (str) to specify the layer names
-
-
-class ELMImportanceProcessor:
-
-    def __init__(self, config: ImportanceProcessorConfig, model: nn.Module, dataloader: Iterable):
+class FeatureExtractor:
+    
+    def __init__(self, config: ImportanceProcessorConfig, model: nn.Module, dataloader: Iterable, layer_names: List[str]):
         self.config = config 
         self.model = model
         self.dataloader = dataloader
-        self.layer_names = get_all_conv_layer_names(model) if config.layer_names == "" else config.layer_names
+        self.layer_names = layer_names
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.__process_feature_and_targets()
 
-    # -------------------------------------------------------------------------
-    # Feature Extraction
-    # -------------------------------------------------------------------------
-    
-    def __process_feature_and_targets(self):
+    def extract_feature_and_targets(self)-> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         
         if self.config.feature_type == "segmentation":
             target_extractor = self.__segmentation_mask_histogram_target_extractor()
         else:
             target_extractor = self.__default_logits_gap_target_extractor
 
-        self.features_by_layer, self.targets = self.__collect_features_and_targets(target_extractor)
+        return self.__process_features_and_targets(target_extractor)
     
-    def __collect_features_and_targets(self, target_extractor: Callable[[Any, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+    def __process_features_and_targets(self, target_extractor: Callable[[Any, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         self.model.eval()
         self.model = self.model.to(self.device)
         storage_device = "cpu"
@@ -229,104 +208,3 @@ class ELMImportanceProcessor:
             return x, y
 
         raise TypeError(f"Unsupported batch type: {type(batch)}")
-
-    # -------------------------------------------------------------------------
-    # Public API
-    # -------------------------------------------------------------------------
-    def compute_elm_global_importances(self) -> Dict[str, List[float]]:
-        """
-        One single ELM trained with features from all selected layers concatenated.
-        Importance of each filter = increase in ELM loss when that feature is neutralized.
-        """
-        
-        if len(self.features_by_layer) == 0:
-            raise RuntimeError("No features were collected for ELM global importance.")
-
-        X_parts = [self.features_by_layer[layer_name] for layer_name in self.layer_names]
-        X = torch.cat(X_parts, dim=1)
-        Y = self.targets
-
-        elm_model = ELMRegressor(
-            hidden_dim=self.config.hidden_dim,
-            reg_lambda=self.config.reg_lambda,
-            activation_name=self.config.activation,
-            seed=self.config.seed,
-            eps=self.config.eps,
-            use_double_for_solver=self.config.use_double_for_solver,
-        )
-
-        elm_model.fit(X, Y)
-        importances = elm_model.compute_ablation_importance(X, Y)
-
-        result: Dict[str, List[float]] = {}
-        offset = 0
-        for layer_name in tqdm(self.layer_names, desc="ELM global feature ranking processing", dynamic_ncols=True):
-            channels = self.features_by_layer[layer_name].shape[1]
-            result[layer_name] = importances[offset: offset + channels]
-            offset += channels
-
-        return result
-
-    def compute_elm_layerwise_importances(self) -> Dict[str, List[float]]:
-        """
-        One ELM per layer.
-        Importance of each filter = increase in ELM loss when that feature is neutralized.
-        """
-        result: Dict[str, List[float]] = {}
-        Y = self.targets.to(self.device)
-
-        for layer_name in tqdm(self.layer_names, desc="ELM layerwise feature ranking processing", dynamic_ncols=True):
-            X = self.features_by_layer[layer_name].to(self.device)
-
-            elm_model = ELMRegressor(
-                hidden_dim=self.config.hidden_dim,
-                reg_lambda=self.config.reg_lambda,
-                activation_name=self.config.activation,
-                seed=self.config.seed,
-                eps=self.config.eps,
-                use_double_for_solver=self.config.use_double_for_solver,
-            )
-
-            elm_model.fit(X, Y)
-            importances = elm_model.compute_ablation_importance(X, Y)
-            result[layer_name] = importances
-
-        return result
-
-    def compute_elm_filterwise_importances(self) -> Dict[str, List[float]]:
-        """
-        One tiny ELM per filter.
-        Importance of one filter = how much that single filter alone reduces target reconstruction loss
-        compared with a constant baseline.
-        """
-        result: Dict[str, List[float]] = {}
-        Y = self.targets.to(self.device)
-        baseline_loss = compute_constant_baseline_loss(Y)
-
-        for layer_name in tqdm(self.layer_names, desc="ELM filterwise feature ranking processing", dynamic_ncols=True):
-            X_layer = self.features_by_layer[layer_name].to(self.device)
-            layer_importances: List[float] = []
-
-            for filter_idx in range(X_layer.shape[1]):
-                X_filter = X_layer[:, filter_idx:filter_idx + 1]
-
-                elm_model = ELMRegressor(
-                    hidden_dim=self.config.hidden_dim_per_filter,
-                    reg_lambda=self.config.reg_lambda,
-                    activation_name=self.config.activation,
-                    seed=self.config.seed + filter_idx,
-                    eps=self.config.eps,
-                    use_double_for_solver=self.config.use_double_for_solver,
-                )
-
-                elm_model.fit(X_filter, Y)
-                pred = elm_model.predict(X_filter)
-                filter_loss = elm_model.calculate_loss(pred, Y).item()
-
-                # Higher reduction => more important
-                importance = max(baseline_loss - filter_loss, 0.0)
-                layer_importances.append(float(importance))
-
-            result[layer_name] = layer_importances
-
-        return result
