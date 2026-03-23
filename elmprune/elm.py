@@ -2,8 +2,6 @@ from typing import Dict, List
 import math
 import torch
 
-Tensor = torch.Tensor
-
 class ELMRegressor:
 
     def __init__(self, hidden_dim: int, reg_lambda: float, activation_name: str, seed: int, eps: float, use_double_for_solver: bool):
@@ -16,7 +14,7 @@ class ELMRegressor:
         self.use_double_for_solver = use_double_for_solver
 
 
-    def fit(self, X: Tensor, Y: Tensor) -> Dict[str, Tensor]:
+    def fit(self, X: torch.Tensor, Y: torch.Tensor) -> Dict[str, torch.Tensor]:
         X = X.to(self.device)
         Y = Y.to(self.device)
 
@@ -47,7 +45,7 @@ class ELMRegressor:
         else:
             self.beta = torch.linalg.solve(lhs, rhs)
 
-    def predict(self, X: Tensor) -> Tensor:
+    def predict(self, X: torch.Tensor) -> torch.Tensor:
         X = X.to(self.W.device)
 
         Xn = (X - self.X_mean) / self.X_std
@@ -57,7 +55,7 @@ class ELMRegressor:
         )
         return H @ self.beta + self.Y_mean
 
-    def compute_ablation_importance(self, X: Tensor, Y: Tensor) -> List[float]:
+    def compute_ablation_importance(self, X: torch.Tensor, Y: torch.Tensor) -> List[float]:
         """
         Importance = increase in ELM loss when feature is neutralized to its mean value.
         Since pruning removes less important filters, low scores should be pruned first.
@@ -90,7 +88,7 @@ class ELMRegressor:
     def calculate_loss(self, Y_pred, Y_original):
         return self.__mse(Y_pred, Y_original)
     
-    def __apply_activation(self, x: Tensor, activation_name: str) -> Tensor:
+    def __apply_activation(self, x: torch.Tensor, activation_name: str) -> torch.Tensor:
         activation_name = activation_name.lower()
 
         if activation_name == "tanh":
@@ -102,5 +100,5 @@ class ELMRegressor:
 
         raise ValueError(f"Unsupported activation: {activation_name}")
     
-    def __mse(self, pred: Tensor, target: Tensor) -> Tensor:
+    def __mse(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         return torch.mean((pred - target) ** 2)

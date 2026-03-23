@@ -1,11 +1,11 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-
 from tqdm.auto import tqdm
 import torch
 from torch import nn
-from .utils import get_layer_by_string, get_all_conv_layer_names
+from .utils import get_layer_by_string, get_all_conv_layer_names, compute_constant_baseline_loss
 from .elm import ELMRegressor
+
 
 @dataclass
 class ImportanceProcessorConfig:
@@ -21,8 +21,6 @@ class ImportanceProcessorConfig:
     num_classes = 3 # if segmentation
     layer_names = "" # to get importance for all layers, or list (str) to specify the layer names
 
-
-Tensor = torch.Tensor
 
 class ELMImportanceProcessor:
 
@@ -47,16 +45,16 @@ class ELMImportanceProcessor:
 
         self.features_by_layer, self.targets = self.__collect_features_and_targets(target_extractor)
     
-    def __collect_features_and_targets(self, target_extractor: Callable[[Any, Tensor, Optional[Tensor]], Tensor]) -> Tuple[Dict[str, Tensor], Tensor]:
+    def __collect_features_and_targets(self, target_extractor: Callable[[Any, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         self.model.eval()
         self.model = self.model.to(self.device)
         storage_device = "cpu"
 
         hooks = []
-        feature_storage: Dict[str, List[Tensor]] = {layer_name: [] for layer_name in self.layer_names}
-        target_storage: List[Tensor] = []
+        feature_storage: Dict[str, List[torch.Tensor]] = {layer_name: [] for layer_name in self.layer_names}
+        target_storage: List[torch.Tensor] = []
 
-        current_batch_features: Dict[str, Tensor] = {}
+        current_batch_features: Dict[str, torch.Tensor] = {}
 
         def make_hook(layer_name: str):
             def hook_fn(module, inputs, output):
@@ -129,7 +127,7 @@ class ELMImportanceProcessor:
 
         return features_by_layer, targets
 
-    def __default_logits_gap_target_extractor(self, model_output: Any) -> Tensor:
+    def __default_logits_gap_target_extractor(self, model_output: Any) -> torch.Tensor:
         """
         Default target extractor:
         converts model output into [N, D] using a GAP-like reduction.
@@ -147,14 +145,14 @@ class ELMImportanceProcessor:
 
         return out.flatten(start_dim=1).detach()
 
-    def __segmentation_mask_histogram_target_extractor(self) -> Callable[[Any, Tensor, Optional[Tensor]], Tensor]:
+    def __segmentation_mask_histogram_target_extractor(self) -> Callable[[Any, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]:
         """
         Returns a target extractor that uses the GT mask distribution per image.
         For each image, target becomes [p(class0), p(class1), ..., p(classK)].
 
         This is more task-aware for segmentation.
         """
-        def _extractor(model_output: Any, input_batch: Tensor, target_batch: Optional[Tensor] = None) -> Tensor:
+        def _extractor(model_output: Any, input_batch: torch.Tensor, target_batch: Optional[torch.Tensor] = None) -> torch.Tensor:
             if target_batch is None:
                 raise ValueError("Target batch is required for mask histogram target extractor.")
 
@@ -177,7 +175,7 @@ class ELMImportanceProcessor:
 
         return _extractor
     
-    def __extract_first_tensor(self, data: Any) -> Tensor:
+    def __extract_first_tensor(self, data: Any) -> torch.Tensor:
         if torch.is_tensor(data):
             return data
 
@@ -194,9 +192,9 @@ class ELMImportanceProcessor:
                 if torch.is_tensor(value):
                     return value
 
-        raise TypeError("Could not extract a tensor from model output / hook output.")
+        raise TypeError("Could not extract a torch.Tensor from model output / hook output.")
 
-    def __unpack_batch(self, batch: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def __unpack_batch(self, batch: Any) -> Tuple[torch.torch.Tensor, Optional[torch.torch.Tensor]]:
         if torch.is_tensor(batch):
             return batch, None
 
@@ -208,7 +206,7 @@ class ELMImportanceProcessor:
             y = batch.get("mask", None)
 
             if not torch.is_tensor(x):
-                raise TypeError("Batch['image'] is not a tensor.")
+                raise TypeError("Batch['image'] is not a torch.Tensor.")
 
             if y is not None and not torch.is_tensor(y):
                 y = None
@@ -223,7 +221,7 @@ class ELMImportanceProcessor:
             y = batch[1] if len(batch) > 1 else None
 
             if not torch.is_tensor(x):
-                raise TypeError("Batch input is not a tensor.")
+                raise TypeError("Batch input is not a torch.Tensor.")
 
             if y is not None and not torch.is_tensor(y):
                 y = None
@@ -303,7 +301,7 @@ class ELMImportanceProcessor:
         """
         result: Dict[str, List[float]] = {}
         Y = self.targets.to(self.device)
-        baseline_loss = ELMImportanceProcessor._constant_baseline_loss(Y)
+        baseline_loss = compute_constant_baseline_loss(Y)
 
         for layer_name in tqdm(self.layer_names, desc="ELM filterwise feature ranking processing", dynamic_ncols=True):
             X_layer = self.features_by_layer[layer_name].to(self.device)
@@ -330,26 +328,5 @@ class ELMImportanceProcessor:
                 layer_importances.append(float(importance))
 
             result[layer_name] = layer_importances
-
-        return result
-
-    # -------------------------------------------------------------------------
-    # Utils
-    # -------------------------------------------------------------------------
-
-    @staticmethod
-    def _constant_baseline_loss(Y: Tensor) -> float:
-        mean_pred = Y.mean(dim=0, keepdim=True)
-        return float(torch.mean((Y - mean_pred) ** 2).item())
-
-    @staticmethod
-    def discover_conv2d_layers(model: nn.Module, only_decoder: bool = False) -> List[str]:
-        result = []
-
-        root_module = model.decoder if only_decoder and hasattr(model, "decoder") else model
-
-        for name, module in root_module.named_modules():
-            if isinstance(module, nn.Conv2d) and module.out_channels > 1:
-                result.append(name)
 
         return result
