@@ -1,131 +1,182 @@
-from typing import List, Iterable, Dict, Tuple
+import copy
 from collections import defaultdict
+from typing import Dict, List, Iterable, Tuple, Optional
 
 import torch
 import torch.nn as nn
 import torch_pruning as tp
 
-from .utils import get_layer_by_string, get_first_dataloader_image, clone_model
+
+def clone_model(model: nn.Module) -> nn.Module:
+    return copy.deepcopy(model).cpu().eval()
+
+
+def get_first_dataloader_image(dataloader: Iterable) -> torch.Tensor:
+    batch = next(iter(dataloader))
+    x = batch["image"]
+    if x.dim() == 3:
+        x = x.unsqueeze(0)
+    return x[:1].cpu()
+
+
+def build_name_to_module(model: nn.Module) -> Dict[str, nn.Module]:
+    return dict(model.named_modules())
 
 
 class PruneProcessor:
+    """
+    percentage = fração dos canais candidatos globais a remover.
+    Ex.: 0.2 => remove os 20% menos importantes entre todos os canais candidatos.
+    """
 
     def __init__(
         self,
         model: nn.Module,
         importances: Dict[str, List[float]],
         percentage: float,
-        dataloader: Iterable
+        dataloader: Iterable,
+        ignore_first_and_last_by_dict_order: bool = True,
+        round_to: Optional[int] = None,
+        verbose: bool = True,
     ):
+        if not (0.0 <= percentage < 1.0):
+            raise ValueError("percentage must be in [0.0, 1.0).")
+
         self.model = clone_model(model)
         self.importances = importances
         self.percentage = percentage
-        self.input_example = get_first_dataloader_image(dataloader).to(torch.device("cpu"))
+        self.example_inputs = get_first_dataloader_image(dataloader)
+        self.ignore_first_and_last_by_dict_order = ignore_first_and_last_by_dict_order
+        self.round_to = round_to
+        self.verbose = verbose
 
-    def execute(self):
-        selected_filters_by_layer = self.__select_global_filters_to_prune()
+    def execute(self) -> nn.Module:
+        name_to_module = build_name_to_module(self.model)
+        candidate_layer_names = self._get_candidate_layer_names()
+        selected_by_name = self._select_global_filter_indices(candidate_layer_names, name_to_module)
 
-        total_selected = sum(len(idxs) for idxs in selected_filters_by_layer.values())
-        print(
-            f"Global pruning selection: {total_selected} filters selected "
-            f"({self.percentage * 100:.0f}% of candidate filters)."
+        if self.verbose:
+            total_selected = sum(len(v) for v in selected_by_name.values())
+            total_candidates = sum(
+                min(len(self.importances[name]), getattr(name_to_module[name], "out_channels", 0))
+                for name in candidate_layer_names
+                if isinstance(name_to_module.get(name), nn.Conv2d)
+            )
+            print(
+                f"Selected {total_selected} / {total_candidates} candidate channels "
+                f"({self.percentage * 100:.2f}%)."
+            )
+
+        ignored_layers = self._get_ignored_layers(name_to_module)
+
+        # Build DG once
+        DG = tp.DependencyGraph().build_dependency(
+            self.model,
+            example_inputs=self.example_inputs,
         )
 
-        for layer_name in self.__get_candidate_layer_names():
-            if layer_name not in selected_filters_by_layer:
+        # Walk all root groups once, sequentially
+        for group in DG.get_all_groups(
+            ignored_layers=ignored_layers,
+            root_module_types=[nn.Conv2d],
+        ):
+            dep, _ = group[0]
+            root_module = dep.target.module
+
+            root_name = self._find_module_name(name_to_module, root_module)
+            if root_name is None:
                 continue
 
-            self.__prune_model_layer_by_indices(
-                layer_name=layer_name,
-                filter_idxs=selected_filters_by_layer[layer_name]
-            )
+            selected_idxs = selected_by_name.get(root_name)
+            if not selected_idxs:
+                continue
+
+            current_out = getattr(root_module, "out_channels", None)
+            if current_out is None or current_out <= 1:
+                continue
+
+            valid_idxs = sorted(set(i for i in selected_idxs if i < current_out))
+
+            # never prune all channels
+            if len(valid_idxs) >= current_out:
+                valid_idxs = valid_idxs[: current_out - 1]
+
+            if not valid_idxs:
+                continue
+
+            # optional rounding safeguard
+            if self.round_to is not None and self.round_to > 1:
+                remaining = current_out - len(valid_idxs)
+                rounded_remaining = max(self.round_to, (remaining // self.round_to) * self.round_to)
+                max_prunable = current_out - rounded_remaining
+                if max_prunable <= 0:
+                    continue
+                valid_idxs = valid_idxs[:max_prunable]
+                if not valid_idxs:
+                    continue
+
+            group.prune(idxs=valid_idxs)
+
+            if self.verbose:
+                print(f"Pruned {root_name}: {len(valid_idxs)} / {current_out}")
 
         return self.model
 
-    def __get_candidate_layer_names(self) -> List[str]:
-        """
-        Assumes the first and last entries in the importance dict
-        should not be pruned.
-        """
-        return list(self.importances.keys())[1:-1]
+    def _get_candidate_layer_names(self) -> List[str]:
+        names = list(self.importances.keys())
+        if self.ignore_first_and_last_by_dict_order and len(names) >= 3:
+            names = names[1:-1]
+        return names
 
-    def __select_global_filters_to_prune(self) -> Dict[str, List[int]]:
-        """
-        Select the lowest-importance filters globally across all candidate layers.
-        Returns a dict:
-            {
-                "layer_name": [filter_idx_1, filter_idx_2, ...]
-            }
-        """
+    def _select_global_filter_indices(
+        self,
+        candidate_layer_names: List[str],
+        name_to_module: Dict[str, nn.Module],
+    ) -> Dict[str, List[int]]:
         global_candidates: List[Tuple[float, str, int]] = []
 
-        for layer_name in self.__get_candidate_layer_names():
-            layer_importances = self.importances[layer_name]
+        for layer_name in candidate_layer_names:
+            module = name_to_module.get(layer_name)
+            if not isinstance(module, nn.Conv2d):
+                continue
 
-            for filter_idx, importance in enumerate(layer_importances):
-                global_candidates.append((importance, layer_name, filter_idx))
+            max_valid = min(len(self.importances[layer_name]), module.out_channels)
+            for idx in range(max_valid):
+                score = float(self.importances[layer_name][idx])
+                global_candidates.append((score, layer_name, idx))
 
-        global_candidates.sort(key=lambda x: x[0], reverse=False)
+        global_candidates.sort(key=lambda x: x[0])  # lowest importance first
 
-        desired_quantity = int(len(global_candidates) * self.percentage)
-        desired_quantity = min(desired_quantity, len(global_candidates))
-
+        k = int(len(global_candidates) * self.percentage)
         selected = defaultdict(list)
 
-        for _, layer_name, filter_idx in global_candidates[:desired_quantity]:
-            selected[layer_name].append(filter_idx)
+        for _, layer_name, idx in global_candidates[:k]:
+            selected[layer_name].append(idx)
 
         for layer_name in selected:
             selected[layer_name] = sorted(set(selected[layer_name]))
 
         return dict(selected)
 
-    def __prune_model_layer_by_indices(self, layer_name: str, filter_idxs: List[int]):
-        try:
-            layer = get_layer_by_string(self.model, layer_name)
+    def _get_ignored_layers(self, name_to_module: Dict[str, nn.Module]) -> List[nn.Module]:
+        ignored = []
 
-            if not isinstance(layer, nn.Conv2d):
-                print(f"Skipping {layer_name}: layer is not Conv2d.")
-                return
+        # ignore first and last by dict order if requested
+        names = list(self.importances.keys())
+        if self.ignore_first_and_last_by_dict_order and len(names) >= 2:
+            first_name = names[0]
+            last_name = names[-1]
 
-            current_out_channels = layer.out_channels
+            if first_name in name_to_module:
+                ignored.append(name_to_module[first_name])
+            if last_name in name_to_module:
+                ignored.append(name_to_module[last_name])
 
-            if current_out_channels <= 1:
-                print(f"Skipping {layer_name}: layer has {current_out_channels} output channel(s).")
-                return
+        return ignored
 
-            valid_filter_idxs = sorted(set(i for i in filter_idxs if i < current_out_channels))
-
-            # Never allow pruning all output channels of the layer
-            if len(valid_filter_idxs) >= current_out_channels:
-                valid_filter_idxs = valid_filter_idxs[:current_out_channels - 1]
-
-            if not valid_filter_idxs:
-                print(f"Skipping {layer_name}: no valid filters to prune.")
-                return
-
-            DG = tp.DependencyGraph()
-            DG.build_dependency(self.model, example_inputs=self.input_example)
-
-            pruning_plan = DG.get_pruning_plan(
-                layer,
-                tp.prune_conv,
-                idxs=valid_filter_idxs
-            )
-
-            pruning_plan.exec()
-
-            self.model.zero_grad()
-            with torch.no_grad():
-                self.model(self.input_example)
-
-            print(
-                f"Prune of layer {layer_name} done with success! "
-                f"Pruned filters: {len(valid_filter_idxs)} / {current_out_channels}"
-            )
-
-        except Exception as e:
-            print(
-                f"Exception in trying to prune | Layer {layer_name} "
-                f"with selected filters {len(filter_idxs)}: {e}"
-            )
+    @staticmethod
+    def _find_module_name(name_to_module: Dict[str, nn.Module], target_module: nn.Module) -> Optional[str]:
+        for name, module in name_to_module.items():
+            if module is target_module:
+                return name
+        return None
