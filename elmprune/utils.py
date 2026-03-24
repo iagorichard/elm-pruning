@@ -48,11 +48,15 @@ def load_dict(dict_path: Path):
         data = json.load(json_file)
     return data
 
-def get_first_dataloader_image(dataloader: Iterable):
-    batch = next(iter(dataloader))
-    return batch["image"][0].unsqueeze(0)
+def clone_model(model: nn.Module) -> nn.Module:
+    return copy.deepcopy(model).cpu().eval()
 
-def clone_model(model: torch.nn):
-    cloned_model = copy.deepcopy(model)
-    cloned_model = cloned_model.cpu()
-    return cloned_model
+def get_first_dataloader_image(dataloader: Iterable) -> torch.Tensor:
+    batch = next(iter(dataloader))
+    x = batch["image"]
+    if x.dim() == 3:
+        x = x.unsqueeze(0)
+    return x[:1].cpu()
+
+def build_name_to_module(model: nn.Module) -> Dict[str, nn.Module]:
+    return dict(model.named_modules())

@@ -1,27 +1,8 @@
-import copy
 from collections import defaultdict
 from typing import Dict, List, Iterable, Tuple, Optional
-
-import torch
 import torch.nn as nn
 import torch_pruning as tp
-
-
-def clone_model(model: nn.Module) -> nn.Module:
-    return copy.deepcopy(model).cpu().eval()
-
-
-def get_first_dataloader_image(dataloader: Iterable) -> torch.Tensor:
-    batch = next(iter(dataloader))
-    x = batch["image"]
-    if x.dim() == 3:
-        x = x.unsqueeze(0)
-    return x[:1].cpu()
-
-
-def build_name_to_module(model: nn.Module) -> Dict[str, nn.Module]:
-    return dict(model.named_modules())
-
+from .utils import clone_model, get_first_dataloader_image, build_name_to_module
 
 class PruneProcessor:
     """
@@ -52,8 +33,8 @@ class PruneProcessor:
 
     def execute(self) -> nn.Module:
         name_to_module = build_name_to_module(self.model)
-        candidate_layer_names = self._get_candidate_layer_names()
-        selected_by_name = self._select_global_filter_indices(candidate_layer_names, name_to_module)
+        candidate_layer_names = self.__get_candidate_layer_names()
+        selected_by_name = self.__select_global_filter_indices(candidate_layer_names, name_to_module)
 
         if self.verbose:
             total_selected = sum(len(v) for v in selected_by_name.values())
@@ -67,7 +48,7 @@ class PruneProcessor:
                 f"({self.percentage * 100:.2f}%)."
             )
 
-        ignored_layers = self._get_ignored_layers(name_to_module)
+        ignored_layers = self.__get_ignored_layers(name_to_module)
 
         # Build DG once
         DG = tp.DependencyGraph().build_dependency(
@@ -83,7 +64,7 @@ class PruneProcessor:
             dep, _ = group[0]
             root_module = dep.target.module
 
-            root_name = self._find_module_name(name_to_module, root_module)
+            root_name = self.__find_module_name(name_to_module, root_module)
             if root_name is None:
                 continue
 
@@ -122,13 +103,13 @@ class PruneProcessor:
 
         return self.model
 
-    def _get_candidate_layer_names(self) -> List[str]:
+    def __get_candidate_layer_names(self) -> List[str]:
         names = list(self.importances.keys())
         if self.ignore_first_and_last_by_dict_order and len(names) >= 3:
             names = names[1:-1]
         return names
 
-    def _select_global_filter_indices(
+    def __select_global_filter_indices(
         self,
         candidate_layer_names: List[str],
         name_to_module: Dict[str, nn.Module],
@@ -158,7 +139,7 @@ class PruneProcessor:
 
         return dict(selected)
 
-    def _get_ignored_layers(self, name_to_module: Dict[str, nn.Module]) -> List[nn.Module]:
+    def __get_ignored_layers(self, name_to_module: Dict[str, nn.Module]) -> List[nn.Module]:
         ignored = []
 
         # ignore first and last by dict order if requested
@@ -174,8 +155,7 @@ class PruneProcessor:
 
         return ignored
 
-    @staticmethod
-    def _find_module_name(name_to_module: Dict[str, nn.Module], target_module: nn.Module) -> Optional[str]:
+    def __find_module_name(self, name_to_module: Dict[str, nn.Module], target_module: nn.Module) -> Optional[str]:
         for name, module in name_to_module.items():
             if module is target_module:
                 return name
