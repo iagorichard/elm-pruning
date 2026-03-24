@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, List, Iterable, Tuple, Optional
+from typing import Dict, List, Any, Tuple, Optional
 import torch.nn as nn
 import torch_pruning as tp
 from .utils import clone_model, get_first_dataloader_image, build_name_to_module
@@ -15,7 +15,7 @@ class PruneProcessor:
         model: nn.Module,
         importances: Dict[str, List[float]],
         percentage: float,
-        dataloader: Iterable,
+        example_inputs: Any,
         ignore_first_and_last_by_dict_order: bool = True,
         round_to: Optional[int] = None,
         verbose: bool = True,
@@ -26,7 +26,7 @@ class PruneProcessor:
         self.model = clone_model(model)
         self.importances = importances
         self.percentage = percentage
-        self.example_inputs = get_first_dataloader_image(dataloader)
+        self.example_inputs = example_inputs
         self.ignore_first_and_last_by_dict_order = ignore_first_and_last_by_dict_order
         self.round_to = round_to
         self.verbose = verbose

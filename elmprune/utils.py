@@ -1,9 +1,14 @@
 from typing import List, Dict, Iterable
 from pathlib import Path
+import re
+import shutil
 import copy
 import json
 import torch
 import torch.nn as nn
+import segmentation_models_pytorch as smp
+
+TIMESTAMP_RE = re.compile(r"^\d{8}$")
 
 
 def get_all_conv_layer_names(model: nn.Module) -> list[str]:
@@ -60,3 +65,108 @@ def get_first_dataloader_image(dataloader: Iterable) -> torch.Tensor:
 
 def build_name_to_module(model: nn.Module) -> Dict[str, nn.Module]:
     return dict(model.named_modules())
+
+def find_best_val_loss_files(root: str) -> list[Path]:
+    root_path = Path(root).resolve()
+    return sorted(root_path.rglob("best_val_loss.pth"))
+
+
+def mirror_copy_files(src_root: str, dst_root: str) -> list[Path]:
+    src_root_path = Path(src_root).resolve()
+    dst_root_path = Path(dst_root).resolve()
+
+    copied_files = []
+
+    for src_file in find_best_val_loss_files(src_root_path):
+        rel_path = src_file.relative_to(src_root_path)
+        dst_file = dst_root_path / rel_path
+
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst_file)
+
+        copied_files.append(dst_file)
+    return copied_files
+
+
+def extract_file_info(file_path: Path, root: Path) -> dict:
+    rel_parts = file_path.relative_to(root).parts
+
+    info = {
+        "full_path": str(file_path),
+        "relative_path": str(file_path.relative_to(root)),
+        "timestamp": None,
+        "backbone": None,
+        "model": None,
+        "fold": None,
+    }
+
+    if len(rel_parts) >= 5:
+        info["timestamp"] = rel_parts[-5]
+        info["backbone"] = rel_parts[-4]
+        info["model"] = rel_parts[-3]
+        info["fold"] = rel_parts[-2]
+
+    return info
+
+
+def collect_infos(root: str) -> list[dict]:
+    root_path = Path(root).resolve()
+    files = find_best_val_loss_files(root_path)
+
+    infos = [extract_file_info(file_path, root_path) for file_path in files]
+    return infos
+
+def get_model(model_name, backbone):
+    if model_name == "Unet":
+        model = smp.Unet(
+            encoder_name=backbone,  
+            encoder_weights="imagenet",    
+            in_channels=3,                 
+            classes=3                      
+        )
+    elif model_name == "FPN":
+        model = smp.FPN(
+            encoder_name=backbone,
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=3
+        )
+    elif model_name == "DeepLabV3":
+        model = smp.DeepLabV3(
+            encoder_name=backbone,
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=3
+        )
+    elif model_name == "MAnet":
+        model = smp.MAnet(
+            encoder_name=backbone,
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=3
+        )
+    elif model_name == "PAN":
+        model = smp.PAN(
+            encoder_name=backbone,
+            encoder_weights="imagenet",
+            in_channels=3,
+            classes=3
+        )
+    else:
+        raise ValueError(f"Model {model_name} and backbone {backbone} not supported.")
+    
+    return model
+
+def get_and_load_model(model_name, backbone_name, checkpoints_path):
+    model = get_model(model_name, backbone_name)
+    model_weights = torch.load(checkpoints_path, map_location=torch.device('cpu'))
+    model.load_state_dict(model_weights['model_state_dict'])
+    return model
+
+def save_pruned_model(pruned_model, input_example, path_out, importances_type):
+    traced_model = torch.jit.trace(pruned_model, input_example)
+    file_out = Path(path_out / ("pruned-"+importances_type+".pt"))
+    traced_model.save(file_out)
+
+def load_pruned_model(model_filepath):
+    return torch.jit.load(model_filepath)
