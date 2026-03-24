@@ -165,8 +165,15 @@ def get_and_load_model(model_name, backbone_name, checkpoints_path):
 
 def save_pruned_model(pruned_model, input_example, path_out, importances_type):
     traced_model = torch.jit.trace(pruned_model, input_example)
-    file_out = Path(path_out / ("pruned-"+importances_type+".pt"))
+    pruned_prefix = "pruned_"
+    file_out = Path(path_out / (pruned_prefix + importances_type + ".pt"))
     traced_model.save(file_out)
 
 def load_pruned_model(model_filepath):
     return torch.jit.load(model_filepath)
+
+def get_val_dataloader_fold(dataloaders, fold_str):
+    folder_num_search = re.search(r'\d+', fold_str)
+    folder_num = int(folder_num_search.group())
+    folder_id = folder_num - 1
+    return dataloaders[folder_id][1]
