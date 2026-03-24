@@ -159,14 +159,13 @@ def get_model(model_name, backbone):
 
 def get_and_load_model(model_name, backbone_name, checkpoints_path):
     model = get_model(model_name, backbone_name)
-    model_weights = torch.load(checkpoints_path, map_location=torch.device('cpu'))
-    model.load_state_dict(model_weights['model_state_dict'])
+    model.load_state_dict(torch.load(checkpoints_path, map_location=torch.device('cpu'))['model_state_dict'])
     return model
 
-def save_pruned_model(pruned_model, input_example, path_out, importances_type):
+def save_pruned_model(pruned_model, input_example, path_out, importances_type, prune_percentage):
     traced_model = torch.jit.trace(pruned_model, input_example)
     pruned_prefix = "pruned_"
-    file_out = Path(path_out / (pruned_prefix + importances_type + ".pt"))
+    file_out = Path(path_out / (f"pruned_{importances_type}_{int(prune_percentage * 100)}.pt"))
     traced_model.save(file_out)
 
 def load_pruned_model(model_filepath):
