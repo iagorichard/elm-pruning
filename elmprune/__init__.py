@@ -6,6 +6,7 @@ from .elm import ELMRegressor
 from .prune_processor import PruneProcessor
 from .prune_config import PruneConfig
 from .prune_config import PruneVerboseLevel
+from .prune_pipeline import PrunePipeline
 
 
 __all__ = ["utils", 
@@ -15,4 +16,5 @@ __all__ = ["utils",
            "ELMRegressor", 
            "PruneProcessor", 
            "PruneConfig",
-           "PruneVerboseLevel"]
+           "PruneVerboseLevel",
+           "PrunePipeline"]
