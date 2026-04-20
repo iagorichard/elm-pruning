@@ -7,131 +7,81 @@ from typing import Dict, List, Any, Tuple, Optional
 import torch
 import torch.nn as nn
 import torch_pruning as tp
-from .utils import clone_model, build_name_to_module
+from .utils import clone_model, build_name_to_module, count_trainable_params, build_name_to_module, rank_normalize
+from .prune_config import PruneConfig
+from math import ceil, floor
 
 class PruneProcessor:
-    """
-    percentage = fração dos canais candidatos globais a remover.
-    Ex.: 0.2 => remove os 20% menos importantes entre todos os canais candidatos.
-    """
-
     def __init__(
         self,
         model: nn.Module,
         importances: Dict[str, List[float]],
-        percentage: float,
         example_inputs: Any,
-        ignore_first_and_last_by_dict_order: bool = True,
-        round_to: Optional[int] = None,
-        verbose: bool = True,
+        config: PruneConfig,
     ):
-        if not (0.0 <= percentage < 1.0):
-            raise ValueError("percentage must be in [0.0, 1.0).")
-
-        self.model = clone_model(model)
+        self.model = copy.deepcopy(model).eval()
         self.importances = importances
-        self.percentage = percentage
         self.example_inputs = example_inputs
-        self.ignore_first_and_last_by_dict_order = ignore_first_and_last_by_dict_order
-        self.round_to = round_to
-        self.verbose = verbose
+        self.config = config
+
+        self.base_name_to_module = build_name_to_module(self.model)
+        self.base_out_channels = {
+            name: module.out_channels
+            for name, module in self.base_name_to_module.items()
+            if isinstance(module, nn.Conv2d)
+        }
+
+        self.protected_layers = self._build_protected_layers()
 
     def execute(self) -> nn.Module:
-        min_remaining_channels = 3
+        base_params = count_trainable_params(self.model)
+        target_params = int(base_params * (1.0 - self.config.target_param_reduction))
 
-        name_to_module = build_name_to_module(self.model)
-        candidate_layer_names = self.__get_candidate_layer_names()
-        selected_by_name = self.__select_global_filter_indices(
-            candidate_layer_names,
-            name_to_module
-        )
+        if self.config.verbose:
+            print(f"[PRUNE] base params   : {base_params}")
+            print(f"[PRUNE] target params : {target_params}")
 
-        if self.verbose:
-            total_selected = sum(len(v) for v in selected_by_name.values())
-            total_candidates = sum(
-                min(len(self.importances[name]), getattr(name_to_module[name], "out_channels", 0))
-                for name in candidate_layer_names
-                if isinstance(name_to_module.get(name), nn.Conv2d)
-            )
-            print(
-                f"Selected {total_selected} / {total_candidates} candidate channels "
-                f"({self.percentage * 100:.2f}%)."
-            )
+        last_params = base_params
 
-        ordered_layer_names = [
-            name for name, module in self.model.named_modules()
-            if name in selected_by_name and isinstance(module, nn.Conv2d)
-        ]
+        while True:
+            current_params = count_trainable_params(self.model)
+            if current_params <= target_params:
+                break
 
-        if self.ignore_first_and_last_by_dict_order and len(ordered_layer_names) >= 3:
-            ordered_layer_names = ordered_layer_names[1:-1]
+            selected_by_name = self._select_indices_for_one_step()
+            if not selected_by_name:
+                if self.config.verbose:
+                    print("[PRUNE] no more valid selections.")
+                break
 
-        for layer_name in ordered_layer_names:
-            current_mapping = build_name_to_module(self.model)
-            root_module = current_mapping.get(layer_name)
+            changed = False
+            ordered_layer_names = [
+                name for name, module in self.model.named_modules()
+                if name in selected_by_name and isinstance(module, nn.Conv2d)
+            ]
 
-            if not isinstance(root_module, nn.Conv2d):
-                continue
-
-            current_out = getattr(root_module, "out_channels", None)
-            if current_out is None or current_out <= min_remaining_channels:
-                continue
-
-            selected_idxs = selected_by_name.get(layer_name, [])
-            selected_idxs = [i for i in selected_idxs if i < current_out]
-
-            if not selected_idxs:
-                continue
-
-            max_prunable = current_out - min_remaining_channels
-            if max_prunable <= 0:
-                continue
-
-            selected_idxs = selected_idxs[:max_prunable]
-            if not selected_idxs:
-                continue
-
-            if self.round_to is not None and self.round_to > 1:
-                remaining = current_out - len(selected_idxs)
-                rounded_remaining = max(
-                    self.round_to,
-                    (remaining // self.round_to) * self.round_to
-                )
-                max_prunable = current_out - rounded_remaining
-                if max_prunable <= 0:
-                    continue
-                selected_idxs = selected_idxs[:max_prunable]
-                if not selected_idxs:
+            for layer_name in ordered_layer_names:
+                idxs = selected_by_name.get(layer_name, [])
+                if not idxs:
                     continue
 
-            pruned = False
-            try_sizes = []
-            n = len(selected_idxs)
-
-            while n > 0:
-                try_sizes.append(n)
-                n = n // 2
-
-            for try_n in try_sizes:
-                trial_model = copy.deepcopy(self.model)
+                trial_model = copy.deepcopy(self.model).eval()
                 trial_mapping = build_name_to_module(trial_model)
                 trial_root = trial_mapping.get(layer_name)
 
                 if not isinstance(trial_root, nn.Conv2d):
                     continue
 
-                idxs_to_try = selected_idxs[:try_n]
-
-                DG = tp.DependencyGraph().build_dependency(
-                    trial_model,
-                    example_inputs=self.example_inputs,
-                )
-
                 try:
+                    DG = tp.DependencyGraph().build_dependency(
+                        trial_model,
+                        example_inputs=self.example_inputs,
+                    )
+
                     group = DG.get_pruning_group(
                         trial_root,
                         tp.prune_conv_out_channels,
-                        idxs=idxs_to_try
+                        idxs=idxs
                     )
 
                     if not DG.check_pruning_group(group):
@@ -139,60 +89,177 @@ class PruneProcessor:
 
                     group.prune()
 
-                    trial_model.eval()
                     with torch.no_grad():
                         _ = trial_model(self.example_inputs)
 
-                    self.model = trial_model
-                    pruned = True
+                    new_params = count_trainable_params(trial_model)
 
-                    if self.verbose:
-                        print(f"Pruned {layer_name}: {try_n} / {current_out}")
+                    if new_params < current_params:
+                        self.model = trial_model
+                        changed = True
 
-                    break
+                        if self.config.verbose:
+                            print(f"[PRUNE] {layer_name}: -{len(idxs)} ch | params {current_params} -> {new_params}")
 
-                except Exception:
+                        if new_params <= target_params:
+                            break
+
+                except Exception as ex:
+                    if self.config.verbose:
+                        print(f"[PRUNE] skipped {layer_name}: {ex}")
                     continue
 
-            if not pruned and self.verbose:
-                print(f"Skipped {layer_name}: no valid fallback pruning found")
+            new_current_params = count_trainable_params(self.model)
+
+            if not changed or new_current_params >= last_params:
+                if self.config.verbose:
+                    print("[PRUNE] stalled.")
+                break
+
+            last_params = new_current_params
 
         return self.model
 
-    
-    def __get_candidate_layer_names(self) -> List[str]:
-        names = list(self.importances.keys())
-        if self.ignore_first_and_last_by_dict_order and len(names) >= 3:
-            names = names[1:-1]
-        return names
+    def _build_protected_layers(self) -> set[str]:
+        conv_names = [
+            name for name, module in self.model.named_modules()
+            if isinstance(module, nn.Conv2d)
+        ]
 
-    def __select_global_filter_indices(
-        self,
-        candidate_layer_names: List[str],
-        name_to_module: Dict[str, nn.Module],
-        ) -> Dict[str, List[int]]:
-        global_candidates: List[Tuple[float, str, int]] = []
+        protected = set()
+        if conv_names:
+            protected.add(conv_names[0])  # first conv
 
-        for layer_name in candidate_layer_names:
-            module = name_to_module.get(layer_name)
+        for name, module in self.model.named_modules():
+            lname = name.lower()
+
             if not isinstance(module, nn.Conv2d):
                 continue
 
-            max_valid = min(len(self.importances[layer_name]), module.out_channels)
-            for idx in range(max_valid):
-                score = float(self.importances[layer_name][idx])
-                global_candidates.append((score, layer_name, idx))
+            if module.out_channels <= 32:
+                protected.add(name)
 
-        global_candidates.sort(key=lambda x: x[0])  # lowest importance first
+            if module.out_channels <= 3:
+                protected.add(name)
 
-        k = int(len(global_candidates) * self.percentage)
+            if any(key in lname for key in [
+                "segmentation_head", "classifier", "logits",
+                "downsample", "shortcut", "skip", "proj"
+            ]):
+                protected.add(name)
+
+        return protected
+
+    def _allowed_prunes_for_layer(self, layer_name: str, current_out: int) -> int:
+        base_out = self.base_out_channels[layer_name]
+
+        min_keep = max(
+            self.config.min_channels_abs,
+            ceil(base_out * self.config.min_keep_ratio),
+        )
+
+        max_total_prune = floor(base_out * self.config.max_layer_prune_ratio)
+        already_pruned = base_out - current_out
+        remaining_total_budget = max_total_prune - already_pruned
+
+        step_budget = max(1, floor(current_out * self.config.per_step_layer_ratio))
+
+        allowed = min(
+            current_out - min_keep,
+            remaining_total_budget,
+            step_budget,
+        )
+
+        if self.config.round_to and self.config.round_to > 1:
+            remaining_after = current_out - allowed
+            rounded_remaining = max(
+                self.config.round_to,
+                (remaining_after // self.config.round_to) * self.config.round_to,
+            )
+            allowed = min(allowed, current_out - rounded_remaining)
+
+        return max(0, allowed)
+
+    def _select_indices_for_one_step(self) -> Dict[str, List[int]]:
+        name_to_module = build_name_to_module(self.model)
+
+        candidate_layers = []
+        for layer_name, scores in self.importances.items():
+            module = name_to_module.get(layer_name)
+            if not isinstance(module, nn.Conv2d):
+                continue
+            if layer_name in self.protected_layers:
+                continue
+            if layer_name not in self.base_out_channels:
+                continue
+            if len(scores) == 0:
+                continue
+            candidate_layers.append(layer_name)
+
+        if self.config.selection_scope == "local":
+            return self._select_local(candidate_layers, name_to_module)
+
+        return self._select_global(candidate_layers, name_to_module)
+
+    def _select_local(
+        self,
+        candidate_layers: List[str],
+        name_to_module: Dict[str, nn.Module],
+    ) -> Dict[str, List[int]]:
+        selected = {}
+
+        for layer_name in candidate_layers:
+            module = name_to_module[layer_name]
+            current_out = module.out_channels
+            allowed = self._allowed_prunes_for_layer(layer_name, current_out)
+            if allowed <= 0:
+                continue
+
+            max_valid = min(current_out, len(self.importances[layer_name]))
+            scores = self.importances[layer_name][:max_valid]
+
+            order = sorted(range(max_valid), key=lambda i: float(scores[i]))
+            idxs = order[:allowed]
+
+            if idxs:
+                selected[layer_name] = idxs
+
+        return selected
+
+    def _select_global(
+        self,
+        candidate_layers: List[str],
+        name_to_module: Dict[str, nn.Module],
+    ) -> Dict[str, List[int]]:
+        global_candidates = []
+
+        for layer_name in candidate_layers:
+            module = name_to_module[layer_name]
+            current_out = module.out_channels
+            allowed = self._allowed_prunes_for_layer(layer_name, current_out)
+            if allowed <= 0:
+                continue
+
+            max_valid = min(current_out, len(self.importances[layer_name]))
+            scores = self.importances[layer_name][:max_valid]
+
+            # Só elm_global deveria cair aqui.
+            # Se insistir em usar global com outros modos, normalize por rank.
+            if self.config.importance_type != "elm_global":
+                scores = rank_normalize(scores)
+
+            order = sorted(range(max_valid), key=lambda i: float(scores[i]))
+            for idx in order[:allowed]:
+                global_candidates.append((float(scores[idx]), layer_name, idx))
+
+        global_candidates.sort(key=lambda x: x[0])
+
+        # passo global pequeno
+        step_global = max(1, int(len(global_candidates) * 0.20))
+        chosen = global_candidates[:step_global]
+
         selected = defaultdict(list)
-
-        for _, layer_name, idx in global_candidates[:k]:
+        for _, layer_name, idx in chosen:
             selected[layer_name].append(idx)
-
-        # preserve importance order; just remove duplicates
-        for layer_name in selected:
-            selected[layer_name] = list(dict.fromkeys(selected[layer_name]))
 
         return dict(selected)

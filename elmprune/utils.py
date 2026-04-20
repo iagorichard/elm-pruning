@@ -63,9 +63,6 @@ def get_first_dataloader_image(dataloader: Iterable) -> torch.Tensor:
         x = x.unsqueeze(0)
     return x[:1].cpu()
 
-def build_name_to_module(model: nn.Module) -> Dict[str, nn.Module]:
-    return dict(model.named_modules())
-
 def find_best_val_loss_files(root: str) -> list[Path]:
     root_path = Path(root).resolve()
     return sorted(root_path.rglob("best_val_loss.pth"))
@@ -176,3 +173,16 @@ def get_val_dataloader_fold(dataloaders, fold_str):
     folder_num = int(folder_num_search.group())
     folder_id = folder_num - 1
     return dataloaders[folder_id][1]
+
+def count_trainable_params(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def build_name_to_module(model: nn.Module) -> Dict[str, nn.Module]:
+    return {name: module for name, module in model.named_modules()}
+
+def rank_normalize(values: List[float]) -> List[float]:
+    if len(values) <= 1:
+        return [1.0 for _ in values]
+    x = torch.tensor(values, dtype=torch.float32)
+    order = torch.argsort(torch.argsort(x))
+    return ((order.float() + 1.0) / float(len(values))).tolist()
