@@ -3,12 +3,12 @@ import torch
 import torch.nn as nn
 import torch_pruning as tp
 from collections import defaultdict
-from typing import Dict, List, Any, Tuple, Optional
+from typing import Dict, List, Any
 import torch
 import torch.nn as nn
 import torch_pruning as tp
-from .utils import clone_model, build_name_to_module, count_trainable_params, build_name_to_module, rank_normalize
-from .prune_config import PruneConfig
+from .utils import build_name_to_module, count_trainable_params, build_name_to_module, rank_normalize
+from .prune_config import PruneConfig, PruneVerboseLevel
 from math import ceil, floor
 
 class PruneProcessor:
@@ -19,7 +19,7 @@ class PruneProcessor:
         example_inputs: Any,
         config: PruneConfig,
     ):
-        self.model = copy.deepcopy(model).eval()
+        self.model = copy.deepcopy(model).to(torch.device("cpu")).eval()
         self.importances = importances
         self.example_inputs = example_inputs
         self.config = config
@@ -37,7 +37,7 @@ class PruneProcessor:
         base_params = count_trainable_params(self.model)
         target_params = int(base_params * (1.0 - self.config.target_param_reduction))
 
-        if self.config.verbose:
+        if self.config.verbose.value == PruneVerboseLevel.ALL:
             print(f"[PRUNE] base params   : {base_params}")
             print(f"[PRUNE] target params : {target_params}")
 
@@ -50,7 +50,7 @@ class PruneProcessor:
 
             selected_by_name = self._select_indices_for_one_step()
             if not selected_by_name:
-                if self.config.verbose:
+                if self.config.verbose.value == PruneVerboseLevel.ALL:
                     print("[PRUNE] no more valid selections.")
                 break
 
@@ -98,25 +98,28 @@ class PruneProcessor:
                         self.model = trial_model
                         changed = True
 
-                        if self.config.verbose:
+                        if self.config.verbose.value == PruneVerboseLevel.ALL:
                             print(f"[PRUNE] {layer_name}: -{len(idxs)} ch | params {current_params} -> {new_params}")
 
                         if new_params <= target_params:
                             break
 
                 except Exception as ex:
-                    if self.config.verbose:
+                    if self.config.verbose.value >= 2:
                         print(f"[PRUNE] skipped {layer_name}: {ex}")
                     continue
 
             new_current_params = count_trainable_params(self.model)
 
             if not changed or new_current_params >= last_params:
-                if self.config.verbose:
+                if self.config.verbose.value == PruneVerboseLevel.ALL:
                     print("[PRUNE] stalled.")
                 break
 
             last_params = new_current_params
+
+        if self.config.verbose.value >= 1:
+            print("[PRUNE] Prune finished!")
 
         return self.model
 

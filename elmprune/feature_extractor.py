@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn as nn
 from tqdm.auto import tqdm
@@ -69,7 +70,9 @@ class FeatureExtractor:
                     enumerate(self.dataloader),
                     total=total_batches,
                     desc="Collecting features",
-                    dynamic_ncols=True
+                    dynamic_ncols=True,
+                    file=sys.stdout,
+                    position=1
                 )
 
                 for batch_idx, batch in progress_bar:

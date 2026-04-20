@@ -5,6 +5,7 @@ from .elm_importance_processor import ELMImportanceProcessor
 from .elm import ELMRegressor
 from .prune_processor import PruneProcessor
 from .prune_config import PruneConfig
+from .prune_config import PruneVerboseLevel
 
 
 __all__ = ["utils", 
@@ -13,4 +14,5 @@ __all__ = ["utils",
            "ELMImportanceProcessor", 
            "ELMRegressor", 
            "PruneProcessor", 
-           "PruneConfig"]
+           "PruneConfig",
+           "PruneVerboseLevel"]

@@ -45,7 +45,7 @@ class ELMImportanceProcessor:
 
         result: Dict[str, List[float]] = {}
         offset = 0
-        for layer_name in tqdm(self.layer_names, desc="ELM global feature ranking processing", dynamic_ncols=True):
+        for layer_name in tqdm(self.layer_names, desc="ELM global feature ranking processing", dynamic_ncols=True, position=1, leave=False):
             channels = self.features_by_layer[layer_name].shape[1]
             result[layer_name] = importances[offset: offset + channels]
             offset += channels
@@ -60,7 +60,7 @@ class ELMImportanceProcessor:
         result: Dict[str, List[float]] = {}
         Y = self.targets.to(self.device)
 
-        for layer_name in tqdm(self.layer_names, desc="ELM layerwise feature ranking processing", dynamic_ncols=True):
+        for layer_name in tqdm(self.layer_names, desc="ELM layerwise feature ranking processing", dynamic_ncols=True, position=1, leave=False):
             X = self.features_by_layer[layer_name].to(self.device)
 
             elm_model = ELMRegressor(
@@ -88,7 +88,7 @@ class ELMImportanceProcessor:
         Y = self.targets.to(self.device)
         baseline_loss = compute_constant_baseline_loss(Y)
 
-        for layer_name in tqdm(self.layer_names, desc="ELM filterwise feature ranking processing", dynamic_ncols=True):
+        for layer_name in tqdm(self.layer_names, desc="ELM filterwise feature ranking processing", dynamic_ncols=True, position=1, leave=False):
             X_layer = self.features_by_layer[layer_name].to(self.device)
             layer_importances: List[float] = []
 

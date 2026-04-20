@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from math import ceil, floor
-from typing import Dict, List, Literal, Optional, Any
-from collections import defaultdict
-import copy
-import torch
-import torch.nn as nn
-import torch_pruning as tp
+from typing import Literal
+from enum import Enum
+
+class PruneVerboseLevel(Enum):
+    BASIC = 1
+    BASIC_ERROR = 2
+    ALL = 3
 
 @dataclass
 class PruneConfig:
@@ -17,4 +17,4 @@ class PruneConfig:
     max_layer_prune_ratio: float = 0.35
     per_step_layer_ratio: float = 0.05     # poda pequena por iteração
     round_to: int = 8
-    verbose: bool = True
+    verbose: PruneVerboseLevel = PruneVerboseLevel.BASIC_ERROR
