@@ -2,14 +2,14 @@ import copy
 import torch
 import torch.nn as nn
 import torch_pruning as tp
+
 from collections import defaultdict
-from typing import Dict, List, Any
-import torch
-import torch.nn as nn
-import torch_pruning as tp
-from .utils import build_name_to_module, count_trainable_params, build_name_to_module, rank_normalize
-from .prune_config import PruneConfig, PruneVerboseLevel
 from math import ceil, floor
+from typing import Dict, List, Any
+
+from .utils import build_name_to_module, count_trainable_params, rank_normalize
+from .prune_config import PruneConfig, PruneVerboseLevel
+
 
 class PruneProcessor:
     def __init__(
@@ -20,9 +20,16 @@ class PruneProcessor:
         config: PruneConfig,
     ):
         self.model = copy.deepcopy(model).to(torch.device("cpu")).eval()
-        self.importances = importances
-        self.example_inputs = example_inputs
+        self.importances_original = importances
+        self.importances_live = copy.deepcopy(importances)
+        self.example_inputs = self._move_to_cpu(example_inputs)
         self.config = config
+
+        # Mantém rastreabilidade dos índices originais ainda vivos em cada camada.
+        self.active_original_indices = {
+            layer_name: list(range(len(scores)))
+            for layer_name, scores in self.importances_live.items()
+        }
 
         self.base_name_to_module = build_name_to_module(self.model)
         self.base_out_channels = {
@@ -65,7 +72,7 @@ class PruneProcessor:
                 if not idxs:
                     continue
 
-                trial_model = copy.deepcopy(self.model).eval()
+                trial_model = copy.deepcopy(self.model).to(torch.device("cpu")).eval()
                 trial_mapping = build_name_to_module(trial_model)
                 trial_root = trial_mapping.get(layer_name)
 
@@ -95,17 +102,26 @@ class PruneProcessor:
                     new_params = count_trainable_params(trial_model)
 
                     if new_params < current_params:
+                        pruned_original_idxs = self._map_local_to_original_indices(layer_name, idxs)
+
                         self.model = trial_model
+                        self._remove_pruned_indices_from_live_importance(layer_name, idxs)
                         changed = True
 
                         if self.config.verbose.value == PruneVerboseLevel.ALL:
-                            print(f"[PRUNE] {layer_name}: -{len(idxs)} ch | params {current_params} -> {new_params}")
+                            print(
+                                f"[PRUNE] {layer_name}: -{len(idxs)} ch | "
+                                f"params {current_params} -> {new_params} | "
+                                f"local idxs {idxs} | original idxs {pruned_original_idxs}"
+                            )
 
-                        if new_params <= target_params:
-                            break
+                        # IMPORTANTE:
+                        # Assim que uma poda dá certo, interrompemos a passada atual
+                        # para recalcular a seleção com o modelo e as importâncias atualizados.
+                        break
 
                 except Exception as ex:
-                    if self.config.verbose.value >= 2:
+                    if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
                         print(f"[PRUNE] skipped {layer_name}: {ex}")
                     continue
 
@@ -118,10 +134,24 @@ class PruneProcessor:
 
             last_params = new_current_params
 
-        if self.config.verbose.value >= 1:
+            if new_current_params <= target_params:
+                break
+
+        if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
             print("[PRUNE] Prune finished!")
 
         return self.model
+
+    def _move_to_cpu(self, x: Any) -> Any:
+        if torch.is_tensor(x):
+            return x.to(torch.device("cpu"))
+        if isinstance(x, tuple):
+            return tuple(self._move_to_cpu(v) for v in x)
+        if isinstance(x, list):
+            return [self._move_to_cpu(v) for v in x]
+        if isinstance(x, dict):
+            return {k: self._move_to_cpu(v) for k, v in x.items()}
+        return x
 
     def _build_protected_layers(self) -> set[str]:
         conv_names = [
@@ -177,7 +207,7 @@ class PruneProcessor:
             remaining_after = current_out - allowed
             rounded_remaining = max(
                 self.config.round_to,
-                (remaining_after // self.config.round_to) * self.config.round_to,
+                (remaining_after // self.config.round_to) * self.config.round_to
             )
             allowed = min(allowed, current_out - rounded_remaining)
 
@@ -187,7 +217,7 @@ class PruneProcessor:
         name_to_module = build_name_to_module(self.model)
 
         candidate_layers = []
-        for layer_name, scores in self.importances.items():
+        for layer_name, scores in self.importances_live.items():
             module = name_to_module.get(layer_name)
             if not isinstance(module, nn.Conv2d):
                 continue
@@ -218,8 +248,8 @@ class PruneProcessor:
             if allowed <= 0:
                 continue
 
-            max_valid = min(current_out, len(self.importances[layer_name]))
-            scores = self.importances[layer_name][:max_valid]
+            max_valid = min(current_out, len(self.importances_live[layer_name]))
+            scores = self.importances_live[layer_name][:max_valid]
 
             order = sorted(range(max_valid), key=lambda i: float(scores[i]))
             idxs = order[:allowed]
@@ -243,8 +273,8 @@ class PruneProcessor:
             if allowed <= 0:
                 continue
 
-            max_valid = min(current_out, len(self.importances[layer_name]))
-            scores = self.importances[layer_name][:max_valid]
+            max_valid = min(current_out, len(self.importances_live[layer_name]))
+            scores = self.importances_live[layer_name][:max_valid]
 
             # Só elm_global deveria cair aqui.
             # Se insistir em usar global com outros modos, normalize por rank.
@@ -266,3 +296,38 @@ class PruneProcessor:
             selected[layer_name].append(idx)
 
         return dict(selected)
+
+    def _remove_pruned_indices_from_live_importance(self, layer_name: str, pruned_local_idxs: List[int]) -> None:
+        if layer_name not in self.importances_live:
+            return
+
+        if len(pruned_local_idxs) == 0:
+            return
+
+        remove_set = set(pruned_local_idxs)
+
+        self.importances_live[layer_name] = [
+            score
+            for i, score in enumerate(self.importances_live[layer_name])
+            if i not in remove_set
+        ]
+
+        if layer_name in self.active_original_indices:
+            self.active_original_indices[layer_name] = [
+                original_idx
+                for i, original_idx in enumerate(self.active_original_indices[layer_name])
+                if i not in remove_set
+            ]
+
+    def _map_local_to_original_indices(self, layer_name: str, local_idxs: List[int]) -> List[int]:
+        if layer_name not in self.active_original_indices:
+            return local_idxs
+
+        active = self.active_original_indices[layer_name]
+        mapped = []
+
+        for i in local_idxs:
+            if 0 <= i < len(active):
+                mapped.append(active[i])
+
+        return mapped
