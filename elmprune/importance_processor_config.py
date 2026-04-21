@@ -17,3 +17,4 @@ class ImportanceProcessorConfig:
     num_classes: int = 3 # if segmentation
     layer_names = "" # to get importance for all layers, or list (str) to specify the layer names
     abs_path: Path = None
+    use_cache: bool = True

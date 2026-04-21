@@ -20,7 +20,7 @@ class ELMImportanceProcessor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.has_global_cache, self.has_layerwise_cache, self.has_filterwise_cache = self.__verify_cache()
         
-        if not self.has_global_cache or not self.has_layerwise_cache or not self.has_filterwise_cache:
+        if not config.use_cache or not self.has_global_cache or not self.has_layerwise_cache or not self.has_filterwise_cache:
             feature_extractor = FeatureExtractor(config, model, dataloader, self.layer_names)
             self.features_by_layer, self.targets = feature_extractor.extract_feature_and_targets()
         else:
