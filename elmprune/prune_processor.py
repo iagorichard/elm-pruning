@@ -47,9 +47,10 @@ class PruneProcessor:
         base_params = count_trainable_params(self.model)
         target_params = int(base_params * (1.0 - self.config.target_param_reduction))
 
-        if self.config.verbose.value == PruneVerboseLevel.ALL:
-            print(f"[PRUNE] base params   : {base_params}")
-            print(f"[PRUNE] target params : {target_params}")
+        if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
+            print(f"[PruneProcessor] Starting pruning process:\n" 
+                  f"[PruneProcessor] - base params   : {base_params};\n"
+                  f"[PruneProcessor] - target params : {target_params} (reduction of ~{self.config.target_param_reduction*100}%).")
 
         last_params = base_params
 
@@ -75,7 +76,7 @@ class PruneProcessor:
                     if self.config.verbose.value == PruneVerboseLevel.ALL:
                         pruned_original_idxs = self._map_local_to_original_indices(layer_name, idxs)
                         print(
-                            f"[PRUNE] {layer_name}: -{len(idxs)} ch | "
+                            f"[PruneProcessor] {layer_name}: -{len(idxs)} ch | "
                             f"params {current_params} -> {new_params} | "
                             f"local idxs {idxs} | original idxs {pruned_original_idxs}"
                         )
@@ -90,7 +91,7 @@ class PruneProcessor:
 
             if not changed or new_current_params >= last_params:
                 if self.config.verbose.value == PruneVerboseLevel.ALL:
-                    print("[PRUNE] stalled.")
+                    print("[PruneProcessor] Stalled status.")
                 break
 
             last_params = new_current_params
@@ -99,7 +100,8 @@ class PruneProcessor:
                 break
 
         if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
-            print("[PRUNE] Prune finished!")
+            print(f"[PruneProcessor] Prune finished!\n"
+                  f"[PruneProcessor] Final params: {sum(p.numel() for p in self.model.parameters())}")
 
         return self.model
 

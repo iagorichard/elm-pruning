@@ -26,6 +26,9 @@ class FeatureExtractor:
         return self.__process_features_and_targets(target_extractor)
     
     def __process_features_and_targets(self, target_extractor: Callable[[Any, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        
+        print("[FeatureExtractor] Extracting features for ELM...")
+        
         self.model.eval()
         self.model = self.model.to(self.device)
         storage_device = "cpu"
@@ -72,7 +75,8 @@ class FeatureExtractor:
                     desc="Collecting features",
                     dynamic_ncols=True,
                     file=sys.stdout,
-                    position=1
+                    position=1, 
+                    leave=False
                 )
 
                 for batch_idx, batch in progress_bar:

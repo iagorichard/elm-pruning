@@ -24,7 +24,7 @@ class ELMImportanceProcessor:
             feature_extractor = FeatureExtractor(config, model, dataloader, self.layer_names)
             self.features_by_layer, self.targets = feature_extractor.extract_feature_and_targets()
         else:
-            print("[ELMImportanceProcessor]: Not necessary to extract features here! Using cache for all importances type.")
+            print("[ELMImportanceProcessor] Not necessary to extract features here! Using cache for all importances type.")
 
     def __verify_cache(self):
         has_global_cache = (self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME).exists()
@@ -37,8 +37,10 @@ class ELMImportanceProcessor:
         One single ELM trained with features from all selected layers concatenated.
         Importance of each filter = increase in ELM loss when that feature is neutralized.
         """
+        print("[ELMImportanceProcessor] Getting importances for global...")
+
         if self.has_global_cache:
-            print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
+            print("[ELMImportanceProcessor] Not necessary to calculate importances here! Using cache for this importance type.")
             result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME)
             return result
         
@@ -78,6 +80,8 @@ class ELMImportanceProcessor:
         One ELM per layer.
         Importance of each filter = increase in ELM loss when that feature is neutralized.
         """
+        print("[ELMImportanceProcessor] Getting importances for layerwise...")
+
         if self.has_layerwise_cache:
             print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
             result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME)
@@ -113,6 +117,8 @@ class ELMImportanceProcessor:
         Importance of one filter = how much that single filter alone reduces target reconstruction loss
         compared with a constant baseline.
         """
+        print("[ELMImportanceProcessor] Getting importances for filterwise...")
+
         if self.has_filterwise_cache:
             print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
             result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME)

@@ -27,10 +27,19 @@ class PrunePipeline:
             raise Exception(f"Prune type {prune_mode} will be implemented in future!")
 
     def execute(self):
+        print("[PrunePipeline] Starting prune pipeline...")
+
+        print("[PrunePipeline] Mirroring files...")
         mirror_copy_files(self.src_root, self.dst_root)
+
+        print("[PrunePipeline] Collecting infos...")
         dst_infos = collect_infos(self.dst_root)
 
-        for dst_file_model in tqdm(dst_infos, desc="Pruning runner", position=0):
+        for dst_file_model in tqdm(dst_infos, desc="[PrunePipeline] Pruning runner", position=0):
+            print(f"[PrunePipeline] Starting context process for:\n"
+                  f"[PrunePipeline] - model: {dst_file_model['model']};\n"
+                  f"[PrunePipeline] - backbone: {dst_file_model['backbone']};\n"
+                  f"[PrunePipeline] - fullpath: {dst_file_model['full_path']}.")
             dense_model = get_and_load_model(
                 dst_file_model["model"],
                 dst_file_model["backbone"],
@@ -48,9 +57,7 @@ class PrunePipeline:
             for importance_type, importance_values in importances_dict.items():
                 selection_scope = "global" if importance_type == "elm_global" else "local"
 
-                for target_param_reduction in tqdm(self.prune_percentages, desc="Target param reduction", position=0):
-                    print(f"Prune for {importance_type} and target reduction {target_param_reduction:.2f}")
-
+                for target_param_reduction in self.prune_percentages:
                     cfg = PruneConfig(
                         importance_type=importance_type,
                         target_param_reduction=target_param_reduction,
@@ -71,9 +78,7 @@ class PrunePipeline:
                     )
 
                     pruned_model = prune_processor.execute()
-
-                    path_out = Path(dst_file_model["full_path"]).resolve().parent
-                    print("Final params:", sum(p.numel() for p in pruned_model.parameters()))
+                    path_out = abs_path
                     save_pruned_model(pruned_model, input_example, path_out, importance_type, target_param_reduction)
 
             dense_model = None
@@ -81,14 +86,12 @@ class PrunePipeline:
             torch.cuda.empty_cache()
 
     def __get_importances_elm_prune(self, model, dataloader, abs_path):
-        print("Extracting features for ELM...")
+        print("[PrunePipeline] Getting importances for ELM...")
         elm_importance_processor = ELMImportanceProcessor(ImportanceProcessorConfig(abs_path=abs_path), model, dataloader)
-        print("Getting importances for layerwise...")
         layerwise_importances = elm_importance_processor.compute_elm_layerwise_importances()
-        print("Getting importances for filterwise...")
         filterwise_importances = elm_importance_processor.compute_elm_filterwise_importances()
-        print("Getting importances for global...")
         global_importances = elm_importance_processor.compute_elm_global_importances()
+
         return  {
                     "elm_layerwise": layerwise_importances, 
                     "elm_filterwise": filterwise_importances, 
