@@ -57,7 +57,7 @@ class PrunePipeline:
                         min_channels_abs=8,
                         min_keep_ratio=0.20,
                         max_layer_prune_ratio=0.8,
-                        per_step_layer_ratio=0.05,
+                        per_step_layer_ratio=0.08,
                         round_to=8,
                         verbose=PruneVerboseLevel.BASIC,
                     )

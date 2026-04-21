@@ -3,9 +3,8 @@ import torch
 import torch.nn as nn
 import torch_pruning as tp
 
-from collections import defaultdict
 from math import ceil, floor
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional, Tuple
 
 from .utils import build_name_to_module, count_trainable_params, rank_normalize
 from .prune_config import PruneConfig, PruneVerboseLevel
@@ -19,10 +18,14 @@ class PruneProcessor:
         example_inputs: Any,
         config: PruneConfig,
     ):
-        self.model = copy.deepcopy(model).to(torch.device("cpu")).eval()
+        # maybe in future:
+        #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.device = torch.device("cpu")
+        self.model = self._move_to_device(copy.deepcopy(model))
         self.importances_original = importances
         self.importances_live = copy.deepcopy(importances)
-        self.example_inputs = self._move_to_cpu(example_inputs)
+        self.example_inputs = self._minimize_example_inputs(self._move_to_device(example_inputs))
         self.config = config
 
         # Mantém rastreabilidade dos índices originais ainda vivos em cada camada.
@@ -55,75 +58,33 @@ class PruneProcessor:
             if current_params <= target_params:
                 break
 
-            selected_by_name = self._select_indices_for_one_step()
-            if not selected_by_name:
-                if self.config.verbose.value == PruneVerboseLevel.ALL:
-                    print("[PRUNE] no more valid selections.")
-                break
-
             changed = False
-            ordered_layer_names = [
-                name for name, module in self.model.named_modules()
-                if name in selected_by_name and isinstance(module, nn.Conv2d)
-            ]
+            blocked_candidates = set()
 
-            for layer_name in ordered_layer_names:
-                idxs = selected_by_name.get(layer_name, [])
-                if not idxs:
-                    continue
+            while True:
+                candidate = self._select_best_candidate_for_one_step(blocked_candidates)
+                if candidate is None:
+                    break
 
-                trial_model = copy.deepcopy(self.model).to(torch.device("cpu")).eval()
-                trial_mapping = build_name_to_module(trial_model)
-                trial_root = trial_mapping.get(layer_name)
+                layer_name, idxs = candidate
+                success, new_params = self._try_prune_one(layer_name, idxs, current_params)
 
-                if not isinstance(trial_root, nn.Conv2d):
-                    continue
+                if success:
+                    changed = True
 
-                try:
-                    DG = tp.DependencyGraph().build_dependency(
-                        trial_model,
-                        example_inputs=self.example_inputs,
-                    )
-
-                    group = DG.get_pruning_group(
-                        trial_root,
-                        tp.prune_conv_out_channels,
-                        idxs=idxs
-                    )
-
-                    if not DG.check_pruning_group(group):
-                        continue
-
-                    group.prune()
-
-                    with torch.no_grad():
-                        _ = trial_model(self.example_inputs)
-
-                    new_params = count_trainable_params(trial_model)
-
-                    if new_params < current_params:
+                    if self.config.verbose.value == PruneVerboseLevel.ALL:
                         pruned_original_idxs = self._map_local_to_original_indices(layer_name, idxs)
+                        print(
+                            f"[PRUNE] {layer_name}: -{len(idxs)} ch | "
+                            f"params {current_params} -> {new_params} | "
+                            f"local idxs {idxs} | original idxs {pruned_original_idxs}"
+                        )
 
-                        self.model = trial_model
-                        self._remove_pruned_indices_from_live_importance(layer_name, idxs)
-                        changed = True
+                    # Após uma poda bem-sucedida, recalcula tudo do zero
+                    # com o modelo e importâncias vivas atualizados.
+                    break
 
-                        if self.config.verbose.value == PruneVerboseLevel.ALL:
-                            print(
-                                f"[PRUNE] {layer_name}: -{len(idxs)} ch | "
-                                f"params {current_params} -> {new_params} | "
-                                f"local idxs {idxs} | original idxs {pruned_original_idxs}"
-                            )
-
-                        # IMPORTANTE:
-                        # Assim que uma poda dá certo, interrompemos a passada atual
-                        # para recalcular a seleção com o modelo e as importâncias atualizados.
-                        break
-
-                except Exception as ex:
-                    if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
-                        print(f"[PRUNE] skipped {layer_name}: {ex}")
-                    continue
+                blocked_candidates.add((layer_name, tuple(idxs)))
 
             new_current_params = count_trainable_params(self.model)
 
@@ -142,15 +103,85 @@ class PruneProcessor:
 
         return self.model
 
-    def _move_to_cpu(self, x: Any) -> Any:
+    def _try_prune_one(
+        self,
+        layer_name: str,
+        idxs: List[int],
+        current_params: int,
+    ) -> Tuple[bool, int]:
+        trial_model = copy.deepcopy(self.model).to(self.device).eval()
+        trial_mapping = build_name_to_module(trial_model)
+        trial_root = trial_mapping.get(layer_name)
+
+        if not isinstance(trial_root, nn.Conv2d):
+            return False, current_params
+
+        try:
+            DG = tp.DependencyGraph().build_dependency(
+                trial_model,
+                example_inputs=self.example_inputs,
+            )
+
+            group = DG.get_pruning_group(
+                trial_root,
+                tp.prune_conv_out_channels,
+                idxs=idxs
+            )
+
+            if not DG.check_pruning_group(group):
+                return False, current_params
+
+            group.prune()
+
+            validate_after_prune = getattr(self.config, "validate_after_prune", True)
+            if validate_after_prune:
+                with torch.no_grad():
+                    _ = trial_model(self.example_inputs)
+
+            new_params = count_trainable_params(trial_model)
+
+            if new_params < current_params:
+                self.model = trial_model
+                self._remove_pruned_indices_from_live_importance(layer_name, idxs)
+                return True, new_params
+
+            return False, current_params
+
+        except Exception as ex:
+            if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
+                print(f"[PRUNE] skipped {layer_name}: {ex}")
+            return False, current_params
+
+    def _move_to_device(self, x: Any) -> Any:
         if torch.is_tensor(x):
-            return x.to(torch.device("cpu"))
+            return x.to(self.device)
         if isinstance(x, tuple):
-            return tuple(self._move_to_cpu(v) for v in x)
+            return tuple(self._move_to_device(v) for v in x)
         if isinstance(x, list):
-            return [self._move_to_cpu(v) for v in x]
+            return [self._move_to_device(v) for v in x]
         if isinstance(x, dict):
-            return {k: self._move_to_cpu(v) for k, v in x.items()}
+            return {k: self._move_to_device(v) for k, v in x.items()}
+        return x
+
+    def _minimize_example_inputs(self, x: Any) -> Any:
+        """
+        Tenta reduzir example_inputs para batch 1, o que costuma ajudar
+        bastante no custo de build_dependency/forward.
+        """
+        if torch.is_tensor(x):
+            if x.ndim >= 1 and x.shape[0] > 1:
+                return x[:1]
+            return x
+
+        if isinstance(x, tuple):
+            return tuple(self._minimize_example_inputs(v) for v in x)
+
+        if isinstance(x, list):
+            return [self._minimize_example_inputs(v) for v in x]
+
+        if isinstance(x, dict):
+            return {k: self._minimize_example_inputs(v) for k, v in x.items()}
+
         return x
 
     def _build_protected_layers(self) -> set[str]:
@@ -213,89 +244,61 @@ class PruneProcessor:
 
         return max(0, allowed)
 
-    def _select_indices_for_one_step(self) -> Dict[str, List[int]]:
+    def _select_best_candidate_for_one_step(
+        self,
+        blocked_candidates: set[Tuple[str, Tuple[int, ...]]],
+    ) -> Optional[Tuple[str, List[int]]]:
         name_to_module = build_name_to_module(self.model)
 
-        candidate_layers = []
-        for layer_name, scores in self.importances_live.items():
+        best_layer = None
+        best_idxs = None
+        best_score = None
+
+        for layer_name, scores_full in self.importances_live.items():
             module = name_to_module.get(layer_name)
+
             if not isinstance(module, nn.Conv2d):
                 continue
             if layer_name in self.protected_layers:
                 continue
             if layer_name not in self.base_out_channels:
                 continue
-            if len(scores) == 0:
+            if len(scores_full) == 0:
                 continue
-            candidate_layers.append(layer_name)
 
-        if self.config.selection_scope == "local":
-            return self._select_local(candidate_layers, name_to_module)
-
-        return self._select_global(candidate_layers, name_to_module)
-
-    def _select_local(
-        self,
-        candidate_layers: List[str],
-        name_to_module: Dict[str, nn.Module],
-    ) -> Dict[str, List[int]]:
-        selected = {}
-
-        for layer_name in candidate_layers:
-            module = name_to_module[layer_name]
             current_out = module.out_channels
             allowed = self._allowed_prunes_for_layer(layer_name, current_out)
             if allowed <= 0:
                 continue
 
-            max_valid = min(current_out, len(self.importances_live[layer_name]))
-            scores = self.importances_live[layer_name][:max_valid]
+            max_valid = min(current_out, len(scores_full))
+            scores = scores_full[:max_valid]
+
+            if self.config.selection_scope == "global" and self.config.importance_type != "elm_global":
+                scores = rank_normalize(scores)
 
             order = sorted(range(max_valid), key=lambda i: float(scores[i]))
             idxs = order[:allowed]
 
-            if idxs:
-                selected[layer_name] = idxs
-
-        return selected
-
-    def _select_global(
-        self,
-        candidate_layers: List[str],
-        name_to_module: Dict[str, nn.Module],
-    ) -> Dict[str, List[int]]:
-        global_candidates = []
-
-        for layer_name in candidate_layers:
-            module = name_to_module[layer_name]
-            current_out = module.out_channels
-            allowed = self._allowed_prunes_for_layer(layer_name, current_out)
-            if allowed <= 0:
+            if not idxs:
                 continue
 
-            max_valid = min(current_out, len(self.importances_live[layer_name]))
-            scores = self.importances_live[layer_name][:max_valid]
+            candidate_key = (layer_name, tuple(idxs))
+            if candidate_key in blocked_candidates:
+                continue
 
-            # Só elm_global deveria cair aqui.
-            # Se insistir em usar global com outros modos, normalize por rank.
-            if self.config.importance_type != "elm_global":
-                scores = rank_normalize(scores)
+            # score médio do bloco candidato: quanto menor, mais descartável
+            block_score = float(sum(float(scores[i]) for i in idxs) / len(idxs))
 
-            order = sorted(range(max_valid), key=lambda i: float(scores[i]))
-            for idx in order[:allowed]:
-                global_candidates.append((float(scores[idx]), layer_name, idx))
+            if best_score is None or block_score < best_score:
+                best_score = block_score
+                best_layer = layer_name
+                best_idxs = idxs
 
-        global_candidates.sort(key=lambda x: x[0])
+        if best_layer is None:
+            return None
 
-        # passo global pequeno
-        step_global = max(1, int(len(global_candidates) * 0.20))
-        chosen = global_candidates[:step_global]
-
-        selected = defaultdict(list)
-        for _, layer_name, idx in chosen:
-            selected[layer_name].append(idx)
-
-        return dict(selected)
+        return best_layer, best_idxs
 
     def _remove_pruned_indices_from_live_importance(self, layer_name: str, pruned_local_idxs: List[int]) -> None:
         if layer_name not in self.importances_live:
