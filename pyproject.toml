@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elm-prune"
+version = "0.1.0"
+description = "ELM-based structural pruning utilities for PyTorch segmentation models."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Iago Rodrigues" }
+]
+keywords = [
+  "deep-learning",
+  "pytorch",
+  "pruning",
+  "structural-pruning",
+  "segmentation",
+  "elm"
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+  "numpy>=1.24",
+  "tqdm>=4.66",
+  "torch>=2.5",
+  "segmentation-models-pytorch",
+  "torch-pruning==1.6.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2",
+  "twine>=5.1.1"
+]
+
+[project.urls]
+Homepage = "https://github.com/iagorichard"
+Repository = "https://github.com/iagorichard"
+Issues = "https://github.com/iagorichard"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["elmprune*"]

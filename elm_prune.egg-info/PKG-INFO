@@ -1,0 +1,31 @@
+Metadata-Version: 2.4
+Name: elm-prune
+Version: 0.1.0
+Summary: ELM-based structural pruning utilities for PyTorch segmentation models.
+Author: Iago Rodrigues
+License: MIT
+Project-URL: Homepage, https://github.com/iagorichard
+Project-URL: Repository, https://github.com/iagorichard
+Project-URL: Issues, https://github.com/iagorichard
+Keywords: deep-learning,pytorch,pruning,structural-pruning,segmentation,elm
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.24
+Requires-Dist: tqdm>=4.66
+Requires-Dist: torch>=2.5
+Requires-Dist: segmentation-models-pytorch
+Requires-Dist: torch-pruning==1.6.1
+Provides-Extra: dev
+Requires-Dist: build>=1.2.2; extra == "dev"
+Requires-Dist: twine>=5.1.1; extra == "dev"
+Dynamic: license-file
+
+# elm-pruning
