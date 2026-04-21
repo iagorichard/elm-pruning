@@ -2,7 +2,7 @@ from typing import Dict, Iterable, List
 from tqdm.auto import tqdm
 import torch
 from torch import nn
-from .utils import get_all_conv_layer_names, compute_constant_baseline_loss
+from .utils import get_all_conv_layer_names, compute_constant_baseline_loss, dump_dict, load_dict
 from .elm import ELMRegressor
 from .importance_processor_config import ImportanceProcessorConfig
 from .feature_extractor import FeatureExtractor
@@ -10,19 +10,37 @@ from .feature_extractor import FeatureExtractor
 
 class ELMImportanceProcessor:
 
+    IMPORTANCES_GLOBAL_CACHE_FILENAME = "importances_elm_global.json"
+    IMPORTANCES_LAYERWISE_CACHE_FILENAME = "importances_elm_layerwise.json"
+    IMPORTANCES_FILTERWISE_CACHE_FILENAME = "importances_elm_filterwise.json"
+
     def __init__(self, config: ImportanceProcessorConfig, model: nn.Module, dataloader: Iterable):
         self.config = config 
         self.layer_names = get_all_conv_layer_names(model) if config.layer_names == "" else config.layer_names
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.has_global_cache, self.has_layerwise_cache, self.has_filterwise_cache = self.__verify_cache()
         
-        feature_extractor = FeatureExtractor(config, model, dataloader, self.layer_names)
-        self.features_by_layer, self.targets = feature_extractor.extract_feature_and_targets()
+        if not self.has_global_cache or not self.has_layerwise_cache or not self.has_filterwise_cache:
+            feature_extractor = FeatureExtractor(config, model, dataloader, self.layer_names)
+            self.features_by_layer, self.targets = feature_extractor.extract_feature_and_targets()
+        else:
+            print("[ELMImportanceProcessor]: Not necessary to extract features here! Using cache for all importances type.")
+
+    def __verify_cache(self):
+        has_global_cache = (self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME).exists()
+        has_layerwise_cache = (self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME).exists()
+        has_filterwise_cache = (self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME).exists()
+        return has_global_cache, has_layerwise_cache, has_filterwise_cache
 
     def compute_elm_global_importances(self) -> Dict[str, List[float]]:
         """
         One single ELM trained with features from all selected layers concatenated.
         Importance of each filter = increase in ELM loss when that feature is neutralized.
         """
+        if self.has_global_cache:
+            print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
+            result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME)
+            return result
         
         if len(self.features_by_layer) == 0:
             raise RuntimeError("No features were collected for ELM global importance.")
@@ -50,6 +68,9 @@ class ELMImportanceProcessor:
             result[layer_name] = importances[offset: offset + channels]
             offset += channels
 
+        importances_dump_path = self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME
+        dump_dict(result, importances_dump_path)
+
         return result
 
     def compute_elm_layerwise_importances(self) -> Dict[str, List[float]]:
@@ -57,6 +78,11 @@ class ELMImportanceProcessor:
         One ELM per layer.
         Importance of each filter = increase in ELM loss when that feature is neutralized.
         """
+        if self.has_layerwise_cache:
+            print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
+            result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME)
+            return result
+
         result: Dict[str, List[float]] = {}
         Y = self.targets.to(self.device)
 
@@ -76,6 +102,9 @@ class ELMImportanceProcessor:
             importances = elm_model.compute_ablation_importance(X, Y)
             result[layer_name] = importances
 
+        importances_dump_path = self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME
+        dump_dict(result, importances_dump_path)
+
         return result
 
     def compute_elm_filterwise_importances(self) -> Dict[str, List[float]]:
@@ -84,6 +113,11 @@ class ELMImportanceProcessor:
         Importance of one filter = how much that single filter alone reduces target reconstruction loss
         compared with a constant baseline.
         """
+        if self.has_filterwise_cache:
+            print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
+            result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME)
+            return result
+        
         result: Dict[str, List[float]] = {}
         Y = self.targets.to(self.device)
         baseline_loss = compute_constant_baseline_loss(Y)
@@ -113,5 +147,8 @@ class ELMImportanceProcessor:
                 layer_importances.append(float(importance))
 
             result[layer_name] = layer_importances
+
+        importances_dump_path = self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME
+        dump_dict(result, importances_dump_path)
 
         return result

@@ -102,6 +102,8 @@ def extract_file_info(file_path: Path, root: Path) -> dict:
         info["backbone"] = rel_parts[-4]
         info["model"] = rel_parts[-3]
         info["fold"] = rel_parts[-2]
+    
+    info["absolute_path"] = file_path.parent
 
     return info
 

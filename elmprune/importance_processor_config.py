@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
+from pathlib import Path
 
 
 @dataclass
@@ -12,6 +13,7 @@ class ImportanceProcessorConfig:
     eps: float = 1e-8
     seed: int = 42
     use_double_for_solver: bool = True
-    feature_type = "segmentation" # segmention | logits
-    num_classes = 3 # if segmentation
+    feature_type: str = "segmentation" # segmention | logits
+    num_classes: int = 3 # if segmentation
     layer_names = "" # to get importance for all layers, or list (str) to specify the layer names
+    abs_path: Path = None

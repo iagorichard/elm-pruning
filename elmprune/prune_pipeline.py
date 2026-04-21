@@ -38,9 +38,10 @@ class PrunePipeline:
             )
             dataloader = get_val_dataloader_fold(self.dataloaders, dst_file_model["fold"])
             input_example = get_first_dataloader_image(dataloader)
+            abs_path = dst_file_model["absolute_path"]
 
             if self.prune_mode == 'elm':
-                importances_dict = self.__get_importances_elm_prune(dense_model, dataloader)
+                importances_dict = self.__get_importances_elm_prune(dense_model, dataloader, abs_path)
             elif self.prune_mode == "tests":
                 importances_dict = self.__get_importances_tests()
 
@@ -79,9 +80,9 @@ class PrunePipeline:
             gc.collect()
             torch.cuda.empty_cache()
 
-    def __get_importances_elm_prune(self, model, dataloader):
+    def __get_importances_elm_prune(self, model, dataloader, abs_path):
         print("Extracting features for ELM...")
-        elm_importance_processor = ELMImportanceProcessor(ImportanceProcessorConfig(), model, dataloader)
+        elm_importance_processor = ELMImportanceProcessor(ImportanceProcessorConfig(abs_path=abs_path), model, dataloader)
         print("Getting importances for layerwise...")
         layerwise_importances = elm_importance_processor.compute_elm_layerwise_importances()
         print("Getting importances for filterwise...")
