@@ -161,7 +161,8 @@ def get_and_load_model(model_name, backbone_name, checkpoints_path):
     model.load_state_dict(torch.load(checkpoints_path, map_location=torch.device('cpu'))['model_state_dict'])
     return model
 
-def save_pruned_model(pruned_model, input_example, path_out, importances_type, prune_percentage):
+def save_pruned_model(pruned_model, path_out, importances_type, prune_percentage):
+    path_out.mkdir(parents=True, exist_ok=True)
     model_to_save = copy.deepcopy(pruned_model).cpu().train()
     model_to_save.zero_grad()
     file_out = Path(path_out / f"pruned_{importances_type}_{int(prune_percentage * 100)}.pth")

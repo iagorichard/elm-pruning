@@ -10,6 +10,7 @@ from .feature_extractor import FeatureExtractor
 
 class ELMImportanceProcessor:
 
+    IMPORTANCES_RELATIVE_FOLDER = "importances"
     IMPORTANCES_GLOBAL_CACHE_FILENAME = "importances_elm_global.json"
     IMPORTANCES_LAYERWISE_CACHE_FILENAME = "importances_elm_layerwise.json"
     IMPORTANCES_FILTERWISE_CACHE_FILENAME = "importances_elm_filterwise.json"
@@ -18,8 +19,11 @@ class ELMImportanceProcessor:
         self.config = config 
         self.layer_names = get_all_conv_layer_names(model) if config.layer_names == "" else config.layer_names
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.has_global_cache, self.has_layerwise_cache, self.has_filterwise_cache = self.__verify_cache()
         
+        self.importances_path = config.abs_path / ELMImportanceProcessor.IMPORTANCES_RELATIVE_FOLDER
+        self.importances_path.mkdir(parents=True, exist_ok=True)
+
+        self.has_global_cache, self.has_layerwise_cache, self.has_filterwise_cache = self.__verify_cache()
         if not config.use_cache or not self.has_global_cache or not self.has_layerwise_cache or not self.has_filterwise_cache:
             feature_extractor = FeatureExtractor(config, model, dataloader, self.layer_names)
             self.features_by_layer, self.targets = feature_extractor.extract_feature_and_targets()
@@ -27,9 +31,9 @@ class ELMImportanceProcessor:
             print("[ELMImportanceProcessor] Not necessary to extract features here! Using cache for all importances type.")
 
     def __verify_cache(self):
-        has_global_cache = (self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME).exists()
-        has_layerwise_cache = (self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME).exists()
-        has_filterwise_cache = (self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME).exists()
+        has_global_cache = (self.importances_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME).exists()
+        has_layerwise_cache = (self.importances_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME).exists()
+        has_filterwise_cache = (self.importances_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME).exists()
         return has_global_cache, has_layerwise_cache, has_filterwise_cache
 
     def compute_elm_global_importances(self) -> Dict[str, List[float]]:
@@ -41,7 +45,7 @@ class ELMImportanceProcessor:
 
         if self.has_global_cache:
             print("[ELMImportanceProcessor] Not necessary to calculate importances here! Using cache for this importance type.")
-            result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME)
+            result = load_dict(self.importances_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME)
             return result
         
         if len(self.features_by_layer) == 0:
@@ -70,7 +74,7 @@ class ELMImportanceProcessor:
             result[layer_name] = importances[offset: offset + channels]
             offset += channels
 
-        importances_dump_path = self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME
+        importances_dump_path = self.importances_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME
         dump_dict(result, importances_dump_path)
 
         return result
@@ -84,7 +88,7 @@ class ELMImportanceProcessor:
 
         if self.has_layerwise_cache:
             print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
-            result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME)
+            result = load_dict(self.importances_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME)
             return result
 
         result: Dict[str, List[float]] = {}
@@ -106,7 +110,7 @@ class ELMImportanceProcessor:
             importances = elm_model.compute_ablation_importance(X, Y)
             result[layer_name] = importances
 
-        importances_dump_path = self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME
+        importances_dump_path = self.importances_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME
         dump_dict(result, importances_dump_path)
 
         return result
@@ -121,7 +125,7 @@ class ELMImportanceProcessor:
 
         if self.has_filterwise_cache:
             print("[ELMImportanceProcessor]: Not necessary to calculate importances here! Using cache for this importance type.")
-            result = load_dict(self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME)
+            result = load_dict(self.importances_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME)
             return result
         
         result: Dict[str, List[float]] = {}
@@ -154,7 +158,7 @@ class ELMImportanceProcessor:
 
             result[layer_name] = layer_importances
 
-        importances_dump_path = self.config.abs_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME
+        importances_dump_path = self.importances_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME
         dump_dict(result, importances_dump_path)
 
         return result

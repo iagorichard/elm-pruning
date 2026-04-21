@@ -8,13 +8,14 @@ from . import ELMImportanceProcessor, ImportanceProcessorConfig, PruneConfig, Pr
 
 class PrunePipeline:
 
-    pruned_suffix = "-pruned"
+    pruning_suffix = "-pruning"
+    pruned_model_folder = "pruned-model"
     prune_percentages_default = [0.2, 0.4, 0.6, 0.8]
     supported_prune_types = ["elm", "mag", "random", "tests"]
 
     def __init__(self, dataloaders, models_root_path, task, subset, prune_percentages=None, prune_mode='elm'):
         self.src_root = Path(models_root_path) / task / subset
-        self.dst_root = Path(models_root_path) / (task + self.pruned_suffix) / subset
+        self.dst_root = Path(models_root_path) / (task + self.pruning_suffix) / subset
         self.src_files = find_best_val_loss_files(self.src_root)
         self.prune_percentages = self.prune_percentages_default if prune_percentages is None else prune_percentages
         self.dataloaders = dataloaders
@@ -78,8 +79,8 @@ class PrunePipeline:
                     )
 
                     pruned_model = prune_processor.execute()
-                    path_out = abs_path
-                    save_pruned_model(pruned_model, input_example, path_out, importance_type, target_param_reduction)
+                    pruned_model_path_out = abs_path / self.pruned_model_folder
+                    save_pruned_model(pruned_model, pruned_model_path_out, importance_type, target_param_reduction)
 
             dense_model = None
             gc.collect()
