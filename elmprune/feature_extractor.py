@@ -1,3 +1,4 @@
+import gc
 import sys
 import torch
 import torch.nn as nn
@@ -62,7 +63,7 @@ class FeatureExtractor:
             hooks.append(layer.register_forward_hook(make_hook(layer_name)))
 
         try:
-            with torch.no_grad():
+            with torch.inference_mode():
                 total_batches = None
                 if hasattr(self.dataloader, "__len__"):
                     total_batches = len(self.dataloader)
@@ -104,6 +105,12 @@ class FeatureExtractor:
         finally:
             for hook in hooks:
                 hook.remove()
+
+            self.model = self.model.to("cpu")
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         features_by_layer = {
             layer_name: torch.cat(feature_storage[layer_name], dim=0)

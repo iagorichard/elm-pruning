@@ -1,3 +1,4 @@
+import gc
 import copy
 import torch
 import torch.nn as nn
@@ -22,7 +23,8 @@ class PruneProcessor:
         #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.device = torch.device("cpu")
-        self.model = self._move_to_device(copy.deepcopy(model))
+        model = model.to("cpu").eval()
+        self.model = copy.deepcopy(model)
         self.importances_original = importances
         self.importances_live = copy.deepcopy(importances)
         self.example_inputs = self._minimize_example_inputs(self._move_to_device(example_inputs))
@@ -152,6 +154,12 @@ class PruneProcessor:
         except Exception as ex:
             if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
                 print(f"[PRUNE] skipped {layer_name}: {ex}")
+
+            del trial_model
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             return False, current_params
 
     def _move_to_device(self, x: Any) -> Any:

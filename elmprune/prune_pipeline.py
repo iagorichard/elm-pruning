@@ -52,6 +52,10 @@ class PrunePipeline:
 
             if self.prune_mode == 'elm':
                 importances_dict = self.__get_importances_elm_prune(dense_model, dataloader, abs_path)
+                dense_model = dense_model.to("cpu").eval()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             elif self.prune_mode == "tests":
                 importances_dict = self.__get_importances_tests()
 
@@ -81,6 +85,14 @@ class PrunePipeline:
                     pruned_model = prune_processor.execute()
                     pruned_model_path_out = abs_path / self.pruned_model_folder
                     save_pruned_model(pruned_model, pruned_model_path_out, importance_type, target_param_reduction)
+                    
+                    del pruned_model
+                    del prune_processor
+                    
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
 
             dense_model = None
             gc.collect()

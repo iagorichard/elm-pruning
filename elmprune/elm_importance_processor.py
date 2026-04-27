@@ -30,6 +30,12 @@ class ELMImportanceProcessor:
         else:
             print("[ELMImportanceProcessor] Not necessary to extract features here! Using cache for all importances type.")
 
+    def __to_float_list(self, values):
+        if torch.is_tensor(values):
+            return values.detach().cpu().float().tolist()
+
+        return [float(v) for v in values]
+
     def __verify_cache(self):
         has_global_cache = (self.importances_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME).exists()
         has_layerwise_cache = (self.importances_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME).exists()
@@ -71,7 +77,7 @@ class ELMImportanceProcessor:
         offset = 0
         for layer_name in tqdm(self.layer_names, desc="ELM global feature ranking processing", dynamic_ncols=True, position=1, leave=False):
             channels = self.features_by_layer[layer_name].shape[1]
-            result[layer_name] = importances[offset: offset + channels]
+            result[layer_name] = self.__to_float_list(importances[offset: offset + channels])
             offset += channels
 
         importances_dump_path = self.importances_path / ELMImportanceProcessor.IMPORTANCES_GLOBAL_CACHE_FILENAME
@@ -108,7 +114,7 @@ class ELMImportanceProcessor:
 
             elm_model.fit(X, Y)
             importances = elm_model.compute_ablation_importance(X, Y)
-            result[layer_name] = importances
+            result[layer_name] = self.__to_float_list(importances)
 
         importances_dump_path = self.importances_path / ELMImportanceProcessor.IMPORTANCES_LAYERWISE_CACHE_FILENAME
         dump_dict(result, importances_dump_path)
@@ -156,7 +162,7 @@ class ELMImportanceProcessor:
                 importance = max(baseline_loss - filter_loss, 0.0)
                 layer_importances.append(float(importance))
 
-            result[layer_name] = layer_importances
+            result[layer_name] = self.__to_float_list(layer_importances)
 
         importances_dump_path = self.importances_path / ELMImportanceProcessor.IMPORTANCES_FILTERWISE_CACHE_FILENAME
         dump_dict(result, importances_dump_path)
