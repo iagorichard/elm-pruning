@@ -82,9 +82,6 @@ class PruneProcessor:
                             f"params {current_params} -> {new_params} | "
                             f"local idxs {idxs} | original idxs {pruned_original_idxs}"
                         )
-
-                    # Após uma poda bem-sucedida, recalcula tudo do zero
-                    # com o modelo e importâncias vivas atualizados.
                     break
 
                 blocked_candidates.add((layer_name, tuple(idxs)))
@@ -152,7 +149,7 @@ class PruneProcessor:
             return False, current_params
 
         except Exception as ex:
-            if self.config.verbose.value >= PruneVerboseLevel.BASIC.value:
+            if self.config.verbose.value >= PruneVerboseLevel.ALL.value:
                 print(f"[PRUNE] skipped {layer_name}: {ex}")
 
             del trial_model

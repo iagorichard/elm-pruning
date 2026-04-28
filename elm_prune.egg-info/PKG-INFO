@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: elm-prune
-Version: 0.1.0
+Version: 0.1.2
 Summary: ELM-based structural pruning utilities for PyTorch segmentation models.
 Author: Iago Rodrigues
 License: MIT
